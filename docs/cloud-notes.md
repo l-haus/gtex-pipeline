@@ -88,6 +88,41 @@ Failures & fixes:
 - MinIO console (ILM rule) screenshot: `docs/minio-ilm.png`
 - Airflow DAG graph: `docs/airflow-green.png`
 
+## Docker FastQC
+mkdir -p images/fastqc samples
+cat > samples/test.fastq <<'EOF'
+@TEST_READ_1
+GATTTGGGGTTCAAAGCAGTATCGATCAAATAGTAA
++
+IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII
+EOF
+
+**First Build**
+make build
+9.03 real         0.25 user         0.25 sys
+
+**Second Build**
+make build
+0.71 real         0.19 user         0.12 sys
+
+**Image Size**
+make size
+fastqc       0.12.1    10f38fa0fbcc   2 minutes ago   385MB
+
+**Run**
+make run
+
+### Push to Registry
+Create a PAT with write:packages, read:packages
+
+echo "$GHCR_TOKEN" | docker login ghcr.io -u <your_github_username> --password-stdin
+
+docker tag fastqc:0.12.1 ghcr.io/<your_github_username>/fastqc:0.12.1
+
+docker push ghcr.io/<your_github_username>/fastqc:0.12.1
+
+ghcr.io/l-haus/fastqc:0.12.1
+
 ## 9) GCP (Week 2 Plan)
 **Terraform intents:** GKE Autopilot (small), GCS bucket (versioned), Artifact Registry, Workload Identity.
 **Guardrails:** smallest tiers; `terraform destroy` documented; cost notes.
@@ -98,6 +133,7 @@ terraform destroy
 
 ## 10) Troubleshooting Log (append daily)
 - 2025-08-12 — Task is hitting AWS S3 instead of MinIO: InvalidAccessKeyId → Point the S3 client to the MinIO endpoint inside Docker (.env file).
+- 2025-08-12 - Make build error, unable to prepare context → Use absolute paths in Makefile.
 
 ## 11) Teardown (local)
 brew services stop minio   # or Ctrl-C if foreground
