@@ -108,3 +108,12 @@ W&B prints progress to stderr (Airflow shows as ERROR). Silenced with `WANDB_CON
 
 **Next**  
 Day 4: Terraform a versioned **GCS** bucket + least‑priv SA; record plan/apply/destroy; swap object store in code to GCS next week.
+
+## 2025-08-14 — Day 4: Terraform GCS + SA (least privilege)
+**Context**: IaC for versioned GCS bucket + 7‑day tmp/ rule; SA with bucket‑scoped objectAdmin.
+**Commands**: `terraform init/plan/apply`; verify with `gsutil versioning get` + `gsutil lifecycle get`.
+**Proof**: `docs/tf-plan.txt`, `docs/tf-apply.txt`; `gs://…/tmp/test.txt` exists.
+**Issues→Fixes**: {{none yet}}
+**Next**: Week‑2 swap MinIO → GCS in DAGs; prepare Workload Identity for GKE.
+
+
