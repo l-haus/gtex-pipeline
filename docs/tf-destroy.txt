@@ -1,0 +1,146 @@
+[0m[1mrandom_id.suffix: Refreshing state... [id=iBQ][0m
+[0m[1mgoogle_project_service.apis["storage.googleapis.com"]: Refreshing state... [id=gtex-pipeline/storage.googleapis.com][0m
+[0m[1mgoogle_project_service.apis["iam.googleapis.com"]: Refreshing state... [id=gtex-pipeline/iam.googleapis.com][0m
+[0m[1mgoogle_service_account.airflow: Refreshing state... [id=projects/gtex-pipeline/serviceAccounts/airflow-bucket-rw@gtex-pipeline.iam.gserviceaccount.com][0m
+[0m[1mgoogle_storage_bucket.data: Refreshing state... [id=rna-dev-8814][0m
+[0m[1mgoogle_storage_bucket_iam_member.sa_rw: Refreshing state... [id=b/rna-dev-8814/roles/storage.objectAdmin/serviceAccount:airflow-bucket-rw@gtex-pipeline.iam.gserviceaccount.com][0m
+
+Terraform used the selected providers to generate the following execution
+plan. Resource actions are indicated with the following symbols:
+  [31m-[0m destroy[0m
+
+Terraform will perform the following actions:
+
+[1m  # google_project_service.apis["iam.googleapis.com"][0m will be [1m[31mdestroyed[0m
+[0m  [31m-[0m[0m resource "google_project_service" "apis" {
+      [31m-[0m[0m disable_on_destroy = false [90m-> null[0m[0m
+      [31m-[0m[0m id                 = "gtex-pipeline/iam.googleapis.com" [90m-> null[0m[0m
+      [31m-[0m[0m project            = "gtex-pipeline" [90m-> null[0m[0m
+      [31m-[0m[0m service            = "iam.googleapis.com" [90m-> null[0m[0m
+    }
+
+[1m  # google_project_service.apis["storage.googleapis.com"][0m will be [1m[31mdestroyed[0m
+[0m  [31m-[0m[0m resource "google_project_service" "apis" {
+      [31m-[0m[0m disable_on_destroy = false [90m-> null[0m[0m
+      [31m-[0m[0m id                 = "gtex-pipeline/storage.googleapis.com" [90m-> null[0m[0m
+      [31m-[0m[0m project            = "gtex-pipeline" [90m-> null[0m[0m
+      [31m-[0m[0m service            = "storage.googleapis.com" [90m-> null[0m[0m
+    }
+
+[1m  # google_service_account.airflow[0m will be [1m[31mdestroyed[0m
+[0m  [31m-[0m[0m resource "google_service_account" "airflow" {
+      [31m-[0m[0m account_id   = "airflow-bucket-rw" [90m-> null[0m[0m
+      [31m-[0m[0m disabled     = false [90m-> null[0m[0m
+      [31m-[0m[0m display_name = "Airflow bucket RW (dev)" [90m-> null[0m[0m
+      [31m-[0m[0m email        = "airflow-bucket-rw@gtex-pipeline.iam.gserviceaccount.com" [90m-> null[0m[0m
+      [31m-[0m[0m id           = "projects/gtex-pipeline/serviceAccounts/airflow-bucket-rw@gtex-pipeline.iam.gserviceaccount.com" [90m-> null[0m[0m
+      [31m-[0m[0m member       = "serviceAccount:airflow-bucket-rw@gtex-pipeline.iam.gserviceaccount.com" [90m-> null[0m[0m
+      [31m-[0m[0m name         = "projects/gtex-pipeline/serviceAccounts/airflow-bucket-rw@gtex-pipeline.iam.gserviceaccount.com" [90m-> null[0m[0m
+      [31m-[0m[0m project      = "gtex-pipeline" [90m-> null[0m[0m
+      [31m-[0m[0m unique_id    = "115639126248319153803" [90m-> null[0m[0m
+        [90m# (1 unchanged attribute hidden)[0m[0m
+    }
+
+[1m  # google_storage_bucket.data[0m will be [1m[31mdestroyed[0m
+[0m  [31m-[0m[0m resource "google_storage_bucket" "data" {
+      [31m-[0m[0m default_event_based_hold    = false [90m-> null[0m[0m
+      [31m-[0m[0m effective_labels            = {
+          [31m-[0m[0m "env"     = "dev"
+          [31m-[0m[0m "project" = "gtex"
+        } [90m-> null[0m[0m
+      [31m-[0m[0m enable_object_retention     = false [90m-> null[0m[0m
+      [31m-[0m[0m force_destroy               = true [90m-> null[0m[0m
+      [31m-[0m[0m id                          = "rna-dev-8814" [90m-> null[0m[0m
+      [31m-[0m[0m labels                      = {
+          [31m-[0m[0m "env"     = "dev"
+          [31m-[0m[0m "project" = "gtex"
+        } [90m-> null[0m[0m
+      [31m-[0m[0m location                    = "NORTHAMERICA-NORTHEAST1" [90m-> null[0m[0m
+      [31m-[0m[0m name                        = "rna-dev-8814" [90m-> null[0m[0m
+      [31m-[0m[0m project                     = "gtex-pipeline" [90m-> null[0m[0m
+      [31m-[0m[0m project_number              = 1061207774316 [90m-> null[0m[0m
+      [31m-[0m[0m public_access_prevention    = "inherited" [90m-> null[0m[0m
+      [31m-[0m[0m requester_pays              = false [90m-> null[0m[0m
+      [31m-[0m[0m self_link                   = "https://www.googleapis.com/storage/v1/b/rna-dev-8814" [90m-> null[0m[0m
+      [31m-[0m[0m storage_class               = "STANDARD" [90m-> null[0m[0m
+      [31m-[0m[0m terraform_labels            = {
+          [31m-[0m[0m "env"     = "dev"
+          [31m-[0m[0m "project" = "gtex"
+        } [90m-> null[0m[0m
+      [31m-[0m[0m uniform_bucket_level_access = true [90m-> null[0m[0m
+      [31m-[0m[0m url                         = "gs://rna-dev-8814" [90m-> null[0m[0m
+
+      [31m-[0m[0m lifecycle_rule {
+          [31m-[0m[0m action {
+              [31m-[0m[0m type          = "Delete" [90m-> null[0m[0m
+                [90m# (1 unchanged attribute hidden)[0m[0m
+            }
+          [31m-[0m[0m condition {
+              [31m-[0m[0m age                                     = 7 [90m-> null[0m[0m
+              [31m-[0m[0m days_since_custom_time                  = 0 [90m-> null[0m[0m
+              [31m-[0m[0m days_since_noncurrent_time              = 0 [90m-> null[0m[0m
+              [31m-[0m[0m matches_prefix                          = [
+                  [31m-[0m[0m "tmp/",
+                ] [90m-> null[0m[0m
+              [31m-[0m[0m matches_storage_class                   = [] [90m-> null[0m[0m
+              [31m-[0m[0m matches_suffix                          = [] [90m-> null[0m[0m
+              [31m-[0m[0m no_age                                  = false [90m-> null[0m[0m
+              [31m-[0m[0m num_newer_versions                      = 0 [90m-> null[0m[0m
+              [31m-[0m[0m send_age_if_zero                        = true [90m-> null[0m[0m
+              [31m-[0m[0m send_days_since_custom_time_if_zero     = false [90m-> null[0m[0m
+              [31m-[0m[0m send_days_since_noncurrent_time_if_zero = false [90m-> null[0m[0m
+              [31m-[0m[0m send_num_newer_versions_if_zero         = false [90m-> null[0m[0m
+              [31m-[0m[0m with_state                              = "ANY" [90m-> null[0m[0m
+                [90m# (3 unchanged attributes hidden)[0m[0m
+            }
+        }
+
+      [31m-[0m[0m soft_delete_policy {
+          [31m-[0m[0m effective_time             = "2025-08-14T18:22:04.219Z" [90m-> null[0m[0m
+          [31m-[0m[0m retention_duration_seconds = 604800 [90m-> null[0m[0m
+        }
+
+      [31m-[0m[0m versioning {
+          [31m-[0m[0m enabled = true [90m-> null[0m[0m
+        }
+    }
+
+[1m  # google_storage_bucket_iam_member.sa_rw[0m will be [1m[31mdestroyed[0m
+[0m  [31m-[0m[0m resource "google_storage_bucket_iam_member" "sa_rw" {
+      [31m-[0m[0m bucket = "b/rna-dev-8814" [90m-> null[0m[0m
+      [31m-[0m[0m etag   = "CAI=" [90m-> null[0m[0m
+      [31m-[0m[0m id     = "b/rna-dev-8814/roles/storage.objectAdmin/serviceAccount:airflow-bucket-rw@gtex-pipeline.iam.gserviceaccount.com" [90m-> null[0m[0m
+      [31m-[0m[0m member = "serviceAccount:airflow-bucket-rw@gtex-pipeline.iam.gserviceaccount.com" [90m-> null[0m[0m
+      [31m-[0m[0m role   = "roles/storage.objectAdmin" [90m-> null[0m[0m
+    }
+
+[1m  # random_id.suffix[0m will be [1m[31mdestroyed[0m
+[0m  [31m-[0m[0m resource "random_id" "suffix" {
+      [31m-[0m[0m b64_std     = "iBQ=" [90m-> null[0m[0m
+      [31m-[0m[0m b64_url     = "iBQ" [90m-> null[0m[0m
+      [31m-[0m[0m byte_length = 2 [90m-> null[0m[0m
+      [31m-[0m[0m dec         = "34836" [90m-> null[0m[0m
+      [31m-[0m[0m hex         = "8814" [90m-> null[0m[0m
+      [31m-[0m[0m id          = "iBQ" [90m-> null[0m[0m
+    }
+
+[1mPlan:[0m 0 to add, 0 to change, 6 to destroy.
+[0m
+Changes to Outputs:
+  [31m-[0m[0m bucket_name = "rna-dev-8814" [90m-> null[0m[0m
+  [31m-[0m[0m sa_email    = "airflow-bucket-rw@gtex-pipeline.iam.gserviceaccount.com" [90m-> null[0m[0m
+[0m[1mgoogle_storage_bucket_iam_member.sa_rw: Destroying... [id=b/rna-dev-8814/roles/storage.objectAdmin/serviceAccount:airflow-bucket-rw@gtex-pipeline.iam.gserviceaccount.com][0m[0m
+[0m[1mgoogle_project_service.apis["iam.googleapis.com"]: Destroying... [id=gtex-pipeline/iam.googleapis.com][0m[0m
+[0m[1mgoogle_project_service.apis["storage.googleapis.com"]: Destroying... [id=gtex-pipeline/storage.googleapis.com][0m[0m
+[0m[1mgoogle_project_service.apis["storage.googleapis.com"]: Destruction complete after 0s[0m
+[0m[1mgoogle_project_service.apis["iam.googleapis.com"]: Destruction complete after 0s[0m
+[0m[1mgoogle_storage_bucket_iam_member.sa_rw: Destruction complete after 5s[0m
+[0m[1mgoogle_service_account.airflow: Destroying... [id=projects/gtex-pipeline/serviceAccounts/airflow-bucket-rw@gtex-pipeline.iam.gserviceaccount.com][0m[0m
+[0m[1mgoogle_storage_bucket.data: Destroying... [id=rna-dev-8814][0m[0m
+[0m[1mgoogle_service_account.airflow: Destruction complete after 1s[0m
+[0m[1mgoogle_storage_bucket.data: Destruction complete after 1s[0m
+[0m[1mrandom_id.suffix: Destroying... [id=iBQ][0m[0m
+[0m[1mrandom_id.suffix: Destruction complete after 0s[0m
+[0m[1m[32m
+Destroy complete! Resources: 6 destroyed.
+[0m
