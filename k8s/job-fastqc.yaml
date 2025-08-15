@@ -1,0 +1,34 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: fastqc
+  namespace: rnaseq
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: fastqc
+        image: fastqc:0.12.1
+        args: ["/input/test.fastq", "--outdir", "/out", "--quiet"]
+        resources:
+          requests: { cpu: "250m", memory: "512Mi" }
+          limits:   { cpu: "1",    memory: "1Gi" }
+        volumeMounts:
+        - name: input
+          mountPath: /input
+          readOnly: true
+        - name: out
+          mountPath: /out
+      - name: keeper
+        image: alpine:3.20
+        command: ["sh","-c","sleep 3600"]
+        volumeMounts:
+        - { name: out, mountPath: /out }
+      volumes:
+      - name: input
+        configMap:
+          name: fastq-sample
+      - name: out
+        emptyDir: {}

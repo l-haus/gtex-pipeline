@@ -116,4 +116,9 @@ Day 4: Terraform a versioned **GCS** bucket + least‑priv SA; record plan/apply
 **Issues→Fixes**: {{none yet}}
 **Next**: Week‑2 swap MinIO → GCS in DAGs; prepare Workload Identity for GKE.
 
-
+## 2025-08-15 — Day 5: K8s Job (FastQC)
+**Context**: Ran FastQC as a K8s Job on kind; mounted FASTQ via ConfigMap; wrote outputs to emptyDir and copied back.
+**Commands**: kind create; kind load docker-image; kubectl apply; logs; kubectl cp.
+**Proof**: `k8s/job-fastqc.yaml`; `samples/out-k8s/test_fastqc.html` present; pod logs captured.
+**Issues→Fixes**: if "exec format error" → rebuilt image for linux/arm64 and re-loaded into kind.
+**Next**: add a K8sPodOperator spec to call this image from Airflow in Week‑2.
