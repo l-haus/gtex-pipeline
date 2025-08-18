@@ -9,7 +9,9 @@
 - apache-airflow-providers-amazon==9.12.0
 - boto3==1.40.9
 - wandb==0.21.1
+
 ---
+
 ## 2025-08-12 — Day 1: MinIO (brew) + Airflow connectivity
 
 **Context**  
@@ -45,6 +47,7 @@ MinIO ILM rule listed; Airflow task logs show keys under `s3://rna-raw/tmp/`.
 - `airflow.hooks.S3_hook` import error → use `from airflow.providers.amazon.aws.hooks.s3 import S3Hook` and add `apache-airflow-providers-amazon`
 
 ---
+
 ## 2025-08-13 — Day 2: Docker (FastQC) + optional push
 
 **Context**  
@@ -78,6 +81,7 @@ Second build faster than first; `samples/out/test_fastqc.html` present.
 - GitHub push protection blocked leaked file (`images/fastqc/.secrets`) → removed from history with `git filter-repo`; revoked token; added `.gitignore` entry
 
 ---
+
 ## 2025-08-13 — Day 3: Airflow `rnaseq_mvp` + W&B artifact
 
 **Context**  
@@ -109,16 +113,369 @@ W&B prints progress to stderr (Airflow shows as ERROR). Silenced with `WANDB_CON
 **Next**  
 Day 4: Terraform a versioned **GCS** bucket + least‑priv SA; record plan/apply/destroy; swap object store in code to GCS next week.
 
-## 2025-08-14 — Day 4: Terraform GCS + SA (least privilege)
-**Context**: IaC for versioned GCS bucket + 7‑day tmp/ rule; SA with bucket‑scoped objectAdmin.
-**Commands**: `terraform init/plan/apply`; verify with `gsutil versioning get` + `gsutil lifecycle get`.
-**Proof**: `docs/tf-plan.txt`, `docs/tf-apply.txt`; `gs://…/tmp/test.txt` exists.
-**Issues→Fixes**: {{none yet}}
-**Next**: Week‑2 swap MinIO → GCS in DAGs; prepare Workload Identity for GKE.
+---
 
-## 2025-08-15 — Day 5: K8s Job (FastQC)
-**Context**: Ran FastQC as a K8s Job on kind; mounted FASTQ via ConfigMap; wrote outputs to emptyDir and copied back.
-**Commands**: kind create; kind load docker-image; kubectl apply; logs; kubectl cp.
-**Proof**: `k8s/job-fastqc.yaml`; `samples/out-k8s/test_fastqc.html` present; pod logs captured.
-**Issues→Fixes**: if "exec format error" → rebuilt image for linux/arm64 and re-loaded into kind.
-**Next**: add a K8sPodOperator spec to call this image from Airflow in Week‑2.
+## 2025-08-14 — Day 4: Terraform GCS + SA (least privilege)
+
+**Context**
+IaC for a versioned GCS bucket with a **7-day `tmp/` rule**, and a **least-privilege** Service Account that has **objectAdmin on this bucket only** (no project-wide `buckets.list`).
+
+### 0) One-time CLI setup
+
+```bash
+export PROJECT_ID=<your_gcp_project_id>
+gcloud auth login --brief
+gcloud auth application-default login    # ADC for Terraform
+gcloud config set project "$PROJECT_ID"
+```
+
+### 1) Terraform scaffold (if not already in repo)
+
+```bash
+mkdir -p terraform/gcs && cd terraform/gcs
+# Create files per repo guide (versions.tf, variables.tf, main.tf, outputs.tf) — see repo.
+```
+
+### 2) Enable required APIs (idempotent)
+
+```bash
+gcloud services enable storage.googleapis.com iam.googleapis.com
+```
+
+### 3) Plan & apply (capture logs)
+
+```bash
+cd terraform/gcs
+terraform init
+terraform plan -var project_id="$PROJECT_ID" | tee ../../docs/tf-plan.txt
+terraform apply -auto-approve -var project_id="$PROJECT_ID" | tee ../../docs/tf-apply.txt
+```
+
+### 4) Pull outputs + sanity checks
+
+```bash
+# from terraform/gcs
+export BUCKET=$(terraform output -raw bucket_name)
+export SA_EMAIL=$(terraform output -raw sa_email)
+echo "BUCKET=$BUCKET"; echo "SA_EMAIL=$SA_EMAIL"
+
+# Versioning + lifecycle verify
+gsutil versioning get gs://$BUCKET
+gsutil lifecycle  get gs://$BUCKET
+
+# Smoke write under tmp/ (should succeed with your user creds)
+echo ok | gsutil cp - "gs://$BUCKET/tmp/test.txt"
+gsutil ls -l "gs://$BUCKET/tmp/test.txt"
+```
+
+### 5) IAM sanity (least privilege)
+
+```bash
+# Bucket IAM shows objectAdmin for only this SA
+gcloud storage buckets get-iam-policy "gs://$BUCKET" \
+  --format='table(bindings.role, bindings.members)' | grep storage.objectAdmin
+
+# (Expected) This SA cannot list project buckets; that's by design.
+# If you try: gsutil ls gs://   → 403
+```
+
+**Proof**
+
+* `docs/tf-plan.txt` and `docs/tf-apply.txt` committed.
+* `gsutil versioning get` shows **Enabled**.
+* `gsutil lifecycle get` shows **age=7** rule for prefix `tmp/`.
+* `gs://$BUCKET/tmp/test.txt` exists.
+
+**Issues → Fixes**
+
+* Empty `terraform output` → run `terraform apply` (state was empty).
+* 403 on `gs://` listing → expected; SA is bucket-scoped only.
+
+**Next**
+Bind this SA to a KSA via **Workload Identity** and prove a pod can write to `gs://$BUCKET` (done on Day 6).
+
+---
+
+## 2025-08-15 — Day 5: K8s Job (FastQC on kind)
+
+**Context**
+Run your `fastqc:0.12.1` container as a **Kubernetes Job** on a local **kind** cluster. Mount a toy FASTQ via **ConfigMap**, write results to **emptyDir**, and copy artifacts back. Handle Apple Silicon (arm64) and `kubectl cp` quirks.
+
+### 0) Pre-reqs (host)
+
+```bash
+brew install kind kubectl
+```
+
+### 1) Create/refresh cluster
+
+```bash
+kind delete cluster --name rnaseq 2>/dev/null || true
+kind create cluster --name rnaseq
+kubectl get nodes
+```
+
+### 2) Ensure image arch matches the node (Apple Silicon = arm64)
+
+```bash
+# Check image arch
+docker inspect --format '{{.Os}}/{{.Architecture}}' fastqc:0.12.1 || true
+
+# If NOT linux/arm64, rebuild & load into kind
+DOCKER_DEFAULT_PLATFORM=linux/arm64 \
+  docker build -t fastqc:0.12.1 -f images/fastqc/Dockerfile images/fastqc
+kind load docker-image fastqc:0.12.1 --name rnaseq
+```
+
+### 3) Namespace + sample input
+
+```bash
+kubectl create namespace rnaseq --dry-run=client -o yaml | kubectl apply -f -
+
+# Create ConfigMap from your toy FASTQ
+kubectl -n rnaseq create configmap fastq-sample \
+  --from-file=samples/test.fastq \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
+### 4) Job manifest (with sidecar to enable `kubectl cp`)
+
+`k8s/job-fastqc.yaml`
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: fastqc
+  namespace: rnaseq
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      volumes:
+      - name: input
+        configMap: { name: fastq-sample }
+      - name: out
+        emptyDir: {}
+      containers:
+      - name: fastqc
+        image: fastqc:0.12.1
+        # ENTRYPOINT=["fastqc"]; give args as a LIST (not a single string!)
+        args: ["/input/test.fastq","--outdir","/out","--quiet"]
+        resources:
+          requests: { cpu: "250m", memory: "512Mi" }
+          limits:   { cpu: "1",    memory: "1Gi" }
+        volumeMounts:
+        - { name: input, mountPath: /input, readOnly: true }
+        - { name: out,   mountPath: /out }
+      # Sidecar keeps pod Running so you can kubectl cp after fastqc exits
+      - name: keeper
+        image: alpine:3.20
+        command: ["sh","-c","sleep 3600"]
+        volumeMounts:
+        - { name: out, mountPath: /out }
+```
+
+### 5) Apply, verify, copy artifacts
+
+```bash
+kubectl apply -f k8s/job-fastqc.yaml
+
+# Wait until pod is Running (fastqc finishes quickly; keeper keeps it alive)
+kubectl -n rnaseq get pods -l job-name=fastqc -w
+
+# Logs from the terminated fastqc container (exitCode should be 0)
+POD=$(kubectl -n rnaseq get pods -l job-name=fastqc -o jsonpath='{.items[0].metadata.name}')
+kubectl -n rnaseq logs "$POD" -c fastqc | sed -n '1,120p'
+
+# Copy results from the running sidecar
+mkdir -p samples/out-k8s
+kubectl -n rnaseq cp --container keeper "$POD":/out ./samples/out-k8s
+ls -lh samples/out-k8s
+```
+
+### 6) Clean up (optional)
+
+```bash
+kubectl -n rnaseq delete job fastqc
+# kind delete cluster --name rnaseq
+```
+
+**Proof**
+
+* `samples/out-k8s/test_fastqc.html` **and** `.zip` present.
+* `kubectl logs -c fastqc` shows normal FastQC output; container exit code **0**.
+* You can explain **why**: ConfigMap → input, `emptyDir` → output, sidecar → artifact copy window.
+
+**Issues → Fixes**
+
+* **`exec format error`** on Apple Silicon → rebuild for `linux/arm64`, `kind load docker-image`.
+* **No artifacts** → args were a single string; fix to list:
+  `args: ["/input/test.fastq","--outdir","/out","--quiet"]`.
+* **`cannot exec into a container in a completed pod` / `container not found ("fastqc")`** → copy from **sidecar** `keeper`, not the terminated `fastqc`.
+
+**Next**
+Stop using `kubectl cp` for pipelines; write `/out` to object storage (MinIO/GCS). You’ll do that as you switch to **GCS** and **GKE** in Week 2.
+
+---
+
+## 2025-08-18 — Day 6: GKE Autopilot + Workload Identity → GCS (smoke)
+
+**Context**
+Prove a pod on GKE Autopilot can read/write a **Terraform-provisioned** GCS bucket **without keys** (Workload Identity). Keep perms least-privilege: bucket-scoped **objectAdmin** only; no project-level `buckets.list`.
+
+### 0) Setup: pull TF outputs and set project
+
+```bash
+export PROJECT_ID=<your_gcp_project_id>
+
+# If needed, authenticate the CLI (user creds) and set project.
+gcloud auth login --brief
+gcloud config set project "$PROJECT_ID"
+
+# Pull outputs from TF (must have been applied on Day 4)
+export BUCKET=$(terraform -chdir=terraform/gcs output -raw bucket_name)
+export SA_EMAIL=$(terraform -chdir=terraform/gcs output -raw sa_email)
+
+echo "BUCKET=$BUCKET"
+echo "SA_EMAIL=$SA_EMAIL"
+# Sanity: as *user*, you should be able to list the bucket itself (not contents)
+gsutil ls -d "gs://$BUCKET"
+```
+
+### 1) Create GKE Autopilot cluster (no `--workload-pool` flag on Autopilot)
+
+```bash
+gcloud services enable container.googleapis.com
+
+gcloud container clusters create-auto rnaseq-dev \
+  --region northamerica-northeast1 \
+  --project "$PROJECT_ID"
+
+# Wait until RUNNING (RECONCILING → RUNNING can take a few minutes)
+until [ "$(gcloud container clusters describe rnaseq-dev \
+  --region northamerica-northeast1 --project "$PROJECT_ID" \
+  --format='value(status)')" = "RUNNING" ]; do date; sleep 10; done
+
+# Install/use the GKE auth plugin (once per machine, if missing)
+#   gcloud components install gke-gcloud-auth-plugin
+export USE_GKE_GCLOUD_AUTH_PLUGIN=True
+
+# Fetch kubeconfig creds and verify
+gcloud container clusters get-credentials rnaseq-dev \
+  --region northamerica-northeast1 --project "$PROJECT_ID"
+
+kubectl get nodes
+kubectl get ns
+```
+
+### 2) Bind Workload Identity (KSA ↔ GSA)
+
+```bash
+# Namespace + Kubernetes Service Account (KSA)
+kubectl create namespace rnaseq --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n rnaseq create serviceaccount airflow-runner --dry-run=client -o yaml | kubectl apply -f -
+
+# Allow the KSA to impersonate the GSA (Workload Identity)
+gcloud iam service-accounts add-iam-policy-binding "$SA_EMAIL" \
+  --role roles/iam.workloadIdentityUser \
+  --member "serviceAccount:${PROJECT_ID}.svc.id.goog[rnaseq/airflow-runner]"
+
+# Annotate the KSA with the GSA email
+kubectl -n rnaseq annotate serviceaccount airflow-runner \
+  iam.gke.io/gcp-service-account="$SA_EMAIL" --overwrite
+
+# Quick checks
+kubectl -n rnaseq get sa airflow-runner -o yaml | grep -A2 iam.gke.io/gcp-service-account
+gcloud iam service-accounts get-iam-policy "$SA_EMAIL" \
+  --format='table(bindings.role, bindings.members)' | grep workloadIdentityUser || true
+```
+
+### 3) Smoke Job manifest (uses `google/cloud-sdk` with `gcloud` + `gsutil`)
+
+`k8s/job-gcs-smoke.yaml`
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gcs-smoke
+  namespace: rnaseq
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      serviceAccountName: airflow-runner
+      restartPolicy: Never
+      containers:
+      - name: gcloud
+        image: google/cloud-sdk:latest
+        command: ["bash","-lc"]
+        env:
+        - { name: BUCKET, value: "{{BUCKET}}" }
+        args:
+        - |
+          set -euo pipefail
+          echo "BUCKET=$BUCKET"
+          : "${BUCKET:?BUCKET not set}"
+          /usr/bin/gsutil ls -d "gs://${BUCKET}"            # bucket exists (no project buckets.list)
+          date | /usr/bin/gsutil cp - "gs://${BUCKET}/tmp/w2d1.txt"
+          /usr/bin/gsutil ls -l "gs://${BUCKET}/tmp/w2d1.txt"
+        resources:
+          requests: { cpu: "100m", memory: "128Mi" }
+          limits:   { cpu: "500m", memory: "512Mi" }
+```
+
+### 4) Apply with the bucket baked in; watch; read logs
+
+```bash
+# Render the placeholder → apply
+sed "s/{{BUCKET}}/$BUCKET/g" k8s/job-gcs-smoke.yaml > /tmp/job.yaml
+grep 'value:' -n /tmp/job.yaml   # should show your real bucket name
+
+kubectl -n rnaseq delete job gcs-smoke --ignore-not-found
+kubectl -n rnaseq apply --dry-run=client -f /tmp/job.yaml
+kubectl -n rnaseq apply -f /tmp/job.yaml
+
+# Watch pod status and then read logs
+kubectl -n rnaseq get pods -l job-name=gcs-smoke -w
+kubectl -n rnaseq logs job/gcs-smoke | sed -n '1,160p'
+```
+
+### 5) Verify from outside the cluster (ground truth)
+
+```bash
+gsutil ls -l "gs://${BUCKET}/tmp/w2d1.txt"
+gsutil cat  "gs://${BUCKET}/tmp/w2d1.txt"   # should print a timestamp line
+```
+
+### 6) Acceptance (today)
+
+* `kubectl logs job/gcs-smoke` shows:
+
+  * `BUCKET=<name>`
+  * `ls -d` on the bucket succeeds.
+  * `gsutil cp` wrote `tmp/w2d1.txt` and `ls -l` shows size/time.
+* No key files anywhere (only WI via KSA annotation + IAM binding).
+* Note: **403** on `gs://` (all buckets) is expected; GSA lacks project-level `buckets.list` by design.
+
+### 7) Cleanup (optional)
+
+```bash
+# Delete the Job only (keep cluster)
+kubectl -n rnaseq delete job gcs-smoke
+
+# Or tear down the cluster to avoid costs (you’ll recreate later)
+# gcloud container clusters delete rnaseq-dev --region northamerica-northeast1 --quiet
+```
+
+### 8) Issues → Fixes (encountered)
+
+* `gcloud: command not found` / `gsutil` missing → use `google/cloud-sdk:latest` (not slim).
+* `container not found` / logs stuck in `ContainerCreating` → wait for Autopilot scale-up; switch context to GKE (not kind); use `kubectl describe pod` events.
+* `gs:///tmp/...` URL error → `BUCKET` env was empty; inject via sed and guard with `: "${BUCKET:?...}"`.
+* `stat gs://` error → `stat` is for objects; use `gsutil ls -d gs://$BUCKET` to check bucket exists.
+
+**Next (tomorrow):** swap the Airflow DAG from MinIO to **GCS** (same idempotency markers) and add a `KubernetesPodOperator` that runs FastQC on **GKE** using this KSA (no keys).
+
