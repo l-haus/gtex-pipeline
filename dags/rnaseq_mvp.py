@@ -1,14 +1,17 @@
+import os
+import tempfile
 from datetime import timedelta
 from pendulum import datetime
 from airflow.decorators import dag, task
-from airflow.providers.amazon.aws.hooks.s3 import S3Hook
 from airflow.exceptions import AirflowSkipException
-import os, tempfile
+from google.cloud.storage import Client as GCSClient
 
-AWS_CONN_ID = "minio_s3"   # or "MINIO_S3" if you set via env var
-BUCKET_RAW = "rna-raw"
+GCS_BUCKET = os.getenv("GCS_BUCKET")
 PREFIX_TMP = "tmp/"
-BUCKET_PROCESSED = "rna-processed"
+MARKERS_PREFIX = "processed/markers/"
+
+def _gcs_client():
+    return GCSClient()
 
 @dag(
     dag_id="rnaseq_mvp",
@@ -20,19 +23,22 @@ BUCKET_PROCESSED = "rna-processed"
 def rnaseq_mvp():
     @task(retries=3, retry_delay=timedelta(minutes=2))
     def list_tmp_keys(bucket: str, prefix: str) -> list[str]:
-        hook = S3Hook(aws_conn_id=AWS_CONN_ID)
-        keys = hook.list_keys(bucket_name=bucket, prefix=prefix) or []
-        return keys
+        client = _gcs_client()
+        blobs = client.list_blobs(bucket, prefix=prefix)
+        out = [b.name for b in blobs if b.name != prefix]
+        return out
 
     @task(retries=2, retry_delay=timedelta(minutes=1))
     def ensure_marker(key: str) -> str:
         """Create a processed marker for idempotency; skip if exists."""
-        hook = S3Hook(aws_conn_id=AWS_CONN_ID)
-        marker = f"markers/{key.replace('/', '_')}.done"
-        if hook.check_for_key(marker, bucket_name=BUCKET_PROCESSED):
+        client = _gcs_client()
+        bucket = client.bucket(GCS_BUCKET)
+        marker_name = f"{MARKERS_PREFIX}{key.replace('/', '_')}.done"
+        blob = bucket.blob(marker_name)
+        if blob.exists():
             raise AirflowSkipException(f"already processed: {key}")
-        hook.load_string("ok", key=marker, bucket_name=BUCKET_PROCESSED, replace=True)
-        return marker
+        blob.upload_from_string("ok")
+        return marker_name
 
     @task
     def log_to_wandb(keys: list[str]) -> None:
@@ -43,7 +49,7 @@ def rnaseq_mvp():
             return
         wandb.login(key=api_key)
         run = wandb.init(project="gtex-rnaseq", job_type="dev",
-                         config={"bucket": BUCKET_RAW, "prefix": PREFIX_TMP, "n_keys": len(keys)})
+                         config={"bucket": GCS_BUCKET, "prefix": PREFIX_TMP, "n_keys": len(keys)})
         with tempfile.NamedTemporaryFile("w", delete=False, suffix=".txt") as f:
             f.write("\n".join(keys or ["<no_keys>"]))
             path = f.name
@@ -52,8 +58,8 @@ def rnaseq_mvp():
         run.log_artifact(art)
         run.finish()
 
-    keys = list_tmp_keys(BUCKET_RAW, PREFIX_TMP)
-    ensure_marker.expand(key=keys)  # dynamic mapping over discovered keys
+    keys = list_tmp_keys(GCS_BUCKET, PREFIX_TMP)
+    ensure_marker.expand(key=keys)
     log_to_wandb(keys)
 
 rnaseq_mvp()

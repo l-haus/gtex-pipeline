@@ -419,7 +419,7 @@ spec:
           set -euo pipefail
           echo "BUCKET=$BUCKET"
           : "${BUCKET:?BUCKET not set}"
-          /usr/bin/gsutil ls -d "gs://${BUCKET}"            # bucket exists (no project buckets.list)
+          /usr/bin/gsutil ls -d "gs://${BUCKET}"
           date | /usr/bin/gsutil cp - "gs://${BUCKET}/tmp/w2d1.txt"
           /usr/bin/gsutil ls -l "gs://${BUCKET}/tmp/w2d1.txt"
         resources:
@@ -479,3 +479,68 @@ kubectl -n rnaseq delete job gcs-smoke
 
 **Next (tomorrow):** swap the Airflow DAG from MinIO to **GCS** (same idempotency markers) and add a `KubernetesPodOperator` that runs FastQC on **GKE** using this KSA (no keys).
 
+## 2025-08-19 — Day 7: Swap DAG storage MinIO → GCS (ADC)
+
+**Context**  
+Airflow now reads `gs://$BUCKET/tmp/` and writes idempotency markers to `gs://$BUCKET/processed/markers/` using **Application Default Credentials**. Fixed two blockers: (1) wrong/typo’d ADC path; (2) missing project in env (user ADC often lacks project).
+
+### Commands (copy–paste)
+
+```bash
+# 0) Vars (repo-scoped)
+export PROJECT_ID=gtex-pipeline
+export BUCKET=$(terraform -chdir=terraform/gcs output -raw bucket_name)
+echo "PROJECT_ID=$PROJECT_ID  BUCKET=$BUCKET"
+
+# 1) Put ADC into the project (bind-mounted into containers) and ignore it
+gcloud auth application-default login   # if not done today
+mkdir -p .secrets
+install -m 600 ~/.config/gcloud/application_default_credentials.json .secrets/gcp-adc.json
+grep -q '^\.secrets/$' .gitignore || printf "\n.secrets/\n" >> .gitignore
+
+# 2) Airflow env (container paths)
+grep -q '^GCS_BUCKET=' .env || printf "GCS_BUCKET=%s\n" "$BUCKET" >> .env
+grep -q '^GOOGLE_APPLICATION_CREDENTIALS=' .env || \
+  printf "GOOGLE_APPLICATION_CREDENTIALS=/usr/local/airflow/.secrets/gcp-adc.json\n" >> .env
+# Explicit project to satisfy google-cloud-storage when ADC has no project field
+grep -q '^GOOGLE_CLOUD_PROJECT=' .env || printf "GOOGLE_CLOUD_PROJECT=%s\n" "$PROJECT_ID" >> .env
+
+# 3) Python deps for the GCS client
+grep -q 'google-cloud-storage' requirements.txt || printf "\ngoogle-cloud-storage>=2.17.0\n" >> requirements.txt
+
+# 4) Restart Airflow containers to pick up .env + mount .secrets
+astro dev restart
+
+# 5) Sanity from inside the scheduler
+astro dev bash --scheduler -c 'ls -l /usr/local/airflow/.secrets/gcp-adc.json && echo "GCP=$GOOGLE_CLOUD_PROJECT"'
+astro dev bash --scheduler -c "python - <<'PY'
+from google.cloud.storage import Client
+c = Client(project=None)  # uses GOOGLE_CLOUD_PROJECT if set
+print('gcs_client_ok')
+PY"
+
+# 6) Trigger DAG and tail logs
+astro dev bash --scheduler -c "airflow dags trigger rnaseq_mvp"
+astro dev logs --scheduler | sed -n '1,200p'
+
+# 7) Ground truth: markers in GCS
+gsutil ls -l gs://$BUCKET/processed/markers/ | tail -n +1
+```
+
+### Code changes (minimal)
+
+- Import the class, not the module; pass project explicitly:
+    - from google.cloud.storage import Client as GCSClient
+    - _gcs_client(): return GCSClient(project=os.getenv("GOOGLE_CLOUD_PROJECT"))
+- Keep TaskFlow the same: list_tmp_keys(GCS_BUCKET, "tmp/") → ensure_marker (dynamic map) → log_to_wandb.
+
+### Proof
+- Airflow run Succeeded.
+- Logs show keys from gs://$BUCKET/tmp/ and markers created/skipped.
+- gsutil ls -l gs://$BUCKET/processed/markers/ returns .done files.
+
+### Issues → Fixes (today)
+
+- DefaultCredentialsError: ...gcp-adc.json was not found → copied ADC to .secrets/ and set GOOGLE_APPLICATION_CREDENTIALS=/usr/local/airflow/.secrets/gcp-adc.json.
+- OSError: Project was not passed... / “No project ID could be determined” → added GOOGLE_CLOUD_PROJECT=$PROJECT_ID to .env and passed project= to Client().
+- TypeError: 'module' object is not callable → stopped calling the storage module; imported Client class directly.
