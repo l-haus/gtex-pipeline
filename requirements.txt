@@ -3,3 +3,5 @@ apache-airflow-providers-amazon
 boto3
 wandb
 google-cloud-storage>=2.17.0
+apache-airflow-providers-cncf-kubernetes>=9.0.0
+kubernetes

@@ -4,11 +4,16 @@ from datetime import timedelta
 from pendulum import datetime
 from airflow.decorators import dag, task
 from airflow.exceptions import AirflowSkipException
+from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
+from airflow.utils.task_group import TaskGroup
 from google.cloud.storage import Client as GCSClient
+from kubernetes.client import V1ResourceRequirements
 
 GCS_BUCKET = os.getenv("GCS_BUCKET")
 PREFIX_TMP = "tmp/"
 MARKERS_PREFIX = "processed/markers/"
+GCS_RAW_SAMPLE = "raw/demo/test.fastq"
+GCS_QC_PREFIX = "processed/qc/demo"
 
 def _gcs_client():
     return GCSClient()
@@ -58,8 +63,51 @@ def rnaseq_mvp():
         run.log_artifact(art)
         run.finish()
 
+    with TaskGroup(group_id="qc_on_gke") as qc_on_gke:
+        fastqc_kpo = KubernetesPodOperator(
+            task_id="fastqc_gke",
+            kubernetes_conn_id="k8s_gke",           # defined in .env
+            name="fastqc-gke",
+            namespace="rnaseq",
+            service_account_name="airflow-runner",  # KSA → GSA via Workload Identity
+            image="google/cloud-sdk:latest",        # includes gsutil + gcloud
+            # Run a shell script inside the container
+            cmds=["bash","-lc"],
+            arguments=[f"""
+            set -euo pipefail
+            echo "Bucket={GCS_BUCKET}  Sample={GCS_RAW_SAMPLE}"
+
+            # 1) Install FastQC at runtime (avoids private registry pulls)
+            apt-get update
+            apt-get install -y --no-install-recommends ca-certificates curl unzip openjdk-17-jre-headless perl
+            rm -rf /var/lib/apt/lists/*
+            curl -fsSL -o /tmp/fastqc.zip https://www.bioinformatics.babraham.ac.uk/projects/fastqc/fastqc_v0.12.1.zip
+            unzip -q /tmp/fastqc.zip -d /opt && chmod +x /opt/FastQC/fastqc
+
+            # 2) Get input from GCS
+            mkdir -p /work/in /work/out
+            gsutil cp "gs://{GCS_BUCKET}/{GCS_RAW_SAMPLE}" /work/in/test.fastq
+
+            # 3) Run FastQC
+            /opt/FastQC/fastqc /work/in/test.fastq --outdir /work/out --quiet
+
+            # 4) Upload results to GCS
+            gsutil -m cp /work/out/* "gs://{GCS_BUCKET}/{GCS_QC_PREFIX}/"
+            gsutil ls -l "gs://{GCS_BUCKET}/{GCS_QC_PREFIX}/"
+            """],
+            get_logs=True,                          # stream pod logs back to Airflow
+            is_delete_operator_pod=True,            # clean up pod after success
+            container_resources=V1ResourceRequirements(
+              requests={"cpu": "1", "memory": "3Gi", "ephemeral-storage": "4Gi"},
+              limits={"cpu": "2", "memory": "4Gi", "ephemeral-storage": "4Gi"},
+            ),
+        )
+
+
     keys = list_tmp_keys(GCS_BUCKET, PREFIX_TMP)
-    ensure_marker.expand(key=keys)
-    log_to_wandb(keys)
+    marker = ensure_marker.expand(key=keys)
+    #log_to_wandb(keys)
+    
+    marker >> qc_on_gke >> log_to_wandb(keys)
 
 rnaseq_mvp()

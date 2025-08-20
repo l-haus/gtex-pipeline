@@ -544,3 +544,153 @@ gsutil ls -l gs://$BUCKET/processed/markers/ | tail -n +1
 - DefaultCredentialsError: ...gcp-adc.json was not found → copied ADC to .secrets/ and set GOOGLE_APPLICATION_CREDENTIALS=/usr/local/airflow/.secrets/gcp-adc.json.
 - OSError: Project was not passed... / “No project ID could be determined” → added GOOGLE_CLOUD_PROJECT=$PROJECT_ID to .env and passed project= to Client().
 - TypeError: 'module' object is not callable → stopped calling the storage module; imported Client class directly.
+
+---
+
+## 2025-08-20 — Week 2 Day 3: KPO on **GKE Autopilot** + GCS I/O (green)
+
+**Context**  
+Run `rnaseq_mvp` on GKE via `KubernetesPodOperator`, reading a FASTQ from GCS and writing FastQC HTML/ZIP to `gs://$BUCKET/processed/qc/demo/`. Airflow runs locally (Astro); pod executes in the cluster under KSA `airflow-runner` bound to GSA (Workload Identity).
+
+### Actions (what I changed today)
+1) **Airflow → GKE auth**: stopped fighting in-cluster fallback; pointed the Airflow scheduler at a **token-only kubeconfig** (no exec plugin).  
+   - Wrote kubeconfig programmatically (no `${ENDPOINT}` placeholders; proper CA decode).  
+   - Airflow connection `k8s_gke` now uses only `extra__kubernetes__kube_config_path=/usr/local/airflow/.kube/config.token` and `namespace=rnaseq` (no `in_cluster`, no `kube_config` JSON).
+
+2) **Fixed TLS**: CA certificate was malformed on macOS; re-decoded base64 to `.kube/ca.crt` before `kubectl config set-cluster`.
+
+3) **KPO image/runtime**: (choose the one I actually used)
+   - **EITHER**: Prebuilt `ghcr.io/<user>/fastqc-gcloud:0.12.1` (FastQC+gsutil baked in).  
+     Requests/Limits: `1Gi/2Gi` RAM, `2Gi` ephemeral storage.  
+   - **OR**: Kept `google/cloud-sdk:latest` **and** raised resources to avoid OOM/eviction: requests `1 CPU, 3Gi RAM, 4Gi eph`, limits `2 CPU, 4Gi RAM, 4Gi eph`.
+
+4) **Outputs verification**: Did **not** rely on the pod existing after completion (KPO deletes it). Verified success from storage:
+   ```bash
+   gsutil ls -l "gs://${BUCKET}/processed/qc/demo/"
+   mkdir -p samples/out-gke && gsutil -m cp "gs://${BUCKET}/processed/qc/demo/*" samples/out-gke/
+   ls -lh samples/out-gke/
+
+# Commands (exact, reproducible)
+# A) Kubeconfig (token; no GKE auth plugin)
+
+export PROJECT_ID=gtex-pipeline
+export CLUSTER=rnaseq-dev
+export REGION=northamerica-northeast1
+export NS=rnaseq
+
+ENDPOINT=$(gcloud container clusters describe "$CLUSTER" --region "$REGION" --project "$PROJECT_ID" --format='value(endpoint)')
+CACERT_B64=$(gcloud container clusters describe "$CLUSTER" --region "$REGION" --project "$PROJECT_ID" --format='value(masterAuth.clusterCaCertificate)')
+TOKEN=$(gcloud auth print-access-token)
+
+mkdir -p .kube
+python3 - <<'PY'
+import base64, os
+open(".kube/ca.crt","wb").write(base64.b64decode(os.environ["CACERT_B64"].encode()))
+PY
+
+# Build kubeconfig with real server + embedded CA + bearer token
+KUBECONFIG=.kube/config.token kubectl config set-cluster gke-${PROJECT_ID}-${REGION}-${CLUSTER} \
+  --server="https://${ENDPOINT}" --certificate-authority=.kube/ca.crt --embed-certs=true
+KUBECONFIG=.kube/config.token kubectl config set-credentials token-user --token="$TOKEN"
+KUBECONFIG=.kube/config.token kubectl config set-context rnaseq-token \
+  --cluster=gke-${PROJECT_ID}-${REGION}-${CLUSTER} --user=token-user --namespace="$NS"
+KUBECONFIG=.kube/config.token kubectl config use-context rnaseq-token
+# Sanity on host:
+KUBECONFIG=.kube/config.token kubectl get ns | sed -n '1,5p'
+
+# B) Airflow connection (only kube_config_path)
+
+# Replace env line so ONLY kube_config_path + namespace are present
+awk '!/^AIRFLOW_CONN_K8S_GKE=/' .env > .env.tmp && mv .env.tmp .env
+cat >> .env <<'EOF'
+AIRFLOW_CONN_K8S_GKE=kubernetes://?extra__kubernetes__kube_config_path=/usr/local/airflow/.kube/config.token&extra__kubernetes__namespace=rnaseq
+EOF
+
+# Ensure the file is visible in the container and restart Astro
+cp .kube/config.token .kube/config
+astro dev restart
+
+# C) KPO resource/image choices
+
+# Prebuilt path (preferred)
+# images/fastqc-gcloud/Dockerfile:
+
+FROM google/cloud-sdk:slim
+ARG FASTQC_VERSION=0.12.1
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl unzip openjdk-17-jre-headless perl \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL -o /tmp/fastqc.zip \
+      https://www.bioinformatics.babraham.ac.uk/projects/fastqc/fastqc_v${FASTQC_VERSION}.zip \
+ && unzip -q /tmp/fastqc.zip -d /opt && chmod +x /opt/FastQC/fastqc && rm /tmp/fastqc.zip
+ENV PATH=/opt/FastQC:$PATH
+ENTRYPOINT ["/bin/bash","-lc"]
+
+Build/push (optional):
+
+docker build -t ghcr.io/<user>/fastqc-gcloud:0.12.1 images/fastqc-gcloud
+# docker push ghcr.io/<user>/fastqc-gcloud:0.12.1
+
+# KPO snippet:
+
+from kubernetes.client import V1ResourceRequirements
+fastqc_kpo = KubernetesPodOperator(
+    task_id="fastqc_gke",
+    image="ghcr.io/<user>/fastqc-gcloud:0.12.1",
+    cmds=["bash","-lc"],
+    arguments=[r'''
+      set -euo pipefail
+      mkdir -p /work/in /work/out
+      gsutil cp "gs://{{ params.bucket }}/raw/demo/test.fastq" /work/in/test.fastq
+      fastqc /work/in/test.fastq --outdir /work/out --quiet
+      gsutil -m cp /work/out/* "gs://{{ params.bucket }}/processed/qc/demo/"
+      gsutil ls -l "gs://{{ params.bucket }}/processed/qc/demo/"
+    '''],
+    params={"bucket": BUCKET},
+    namespace="rnaseq",
+    service_account_name="airflow-runner",
+    get_logs=True,
+    is_delete_operator_pod=True,
+    container_resources=V1ResourceRequirements(
+        requests={"cpu":"500m","memory":"1Gi","ephemeral-storage":"2Gi"},
+        limits={"cpu":"1","memory":"2Gi","ephemeral-storage":"2Gi"},
+    ),
+)
+
+OR: keep google/cloud-sdk and bump resources
+
+container_resources=V1ResourceRequirements(
+    requests={"cpu":"1","memory":"3Gi","ephemeral-storage":"4Gi"},
+    limits={"cpu":"2","memory":"4Gi","ephemeral-storage":"4Gi"},
+)
+```
+
+### Proof
+
+    Airflow task qc_on_gke.fastqc_gke succeeded.
+
+    gs://$BUCKET/processed/qc/demo/ contains FastQC HTML/ZIP (gsutil ls -l … shows sizes).
+
+    W&B run present (if WANDB_API_KEY set).
+
+    Pod may not be present (KPO deletes on finish); success verified via storage artifacts.
+
+### Issues → Fixes (root cause → change)
+
+    KPO tried in-cluster; “Service host/port not set.” → Removed in_cluster; used only kube_config_path.
+
+    Mutually exclusive extras (kube_config_path + in_cluster). → Dropped in_cluster entirely.
+
+    NameResolutionError to %5C%7BENDPOINT%5C%7D. → Rewrote kubeconfig with real endpoint (no heredoc quoting).
+
+    TLS cert “not standards compliant.” → Decoded CA with Python base64 and embedded it.
+
+    Pod exit 137 (OOM/ephemeral storage). → Prebuilt FastQC image or bumped resources (see above).
+
+    Cannot kubectl get pods … after success. → By design (is_delete_operator_pod=True); verify via GCS outputs. If needed, set on_finish_action="keep_pod" for debugging.
+
+### Next
+
+    Make auth durable: extend Astro image to install google-cloud-sdk-gke-gcloud-auth-plugin; switch back to exec-based kubeconfig (no token refresh).
+
+    Parameterize sample path & output prefix; add MultiQC step; tighten idempotency around outputs.
