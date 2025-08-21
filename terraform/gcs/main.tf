@@ -43,3 +43,9 @@ resource "google_storage_bucket_iam_member" "sa_rw" {
   role   = "roles/storage.objectAdmin"
   member = "serviceAccount:${google_service_account.airflow.email}"
 }
+
+resource "google_service_account_iam_member" "airflow_wi" {
+  service_account_id = google_service_account.airflow.name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "serviceAccount:${var.project_id}.svc.id.goog[rnaseq/airflow-runner]"
+}

@@ -694,3 +694,135 @@ container_resources=V1ResourceRequirements(
     Make auth durable: extend Astro image to install google-cloud-sdk-gke-gcloud-auth-plugin; switch back to exec-based kubeconfig (no token refresh).
 
     Parameterize sample path & output prefix; add MultiQC step; tighten idempotency around outputs.
+
+## 2025-08-21 — Week-2 Day-4: GKE Workload Identity (no JSON keys)
+
+### Context
+Bind Kubernetes SA rnaseq/airflow-runner to GCP SA airflow-bucket-rw@${PROJECT_ID}.iam.gserviceaccount.com so KubernetesPodOperator pods can use gsutil without Application Default Credentials (ADC) JSON. This removes key files and fixes GKE auth in-cluster.
+
+### Why it matters (ROI)
+- Eliminates static keys/secrets → lower risk.
+- Pods “just work” with GCS using metadata server tokens → simpler deploys.
+- Unblocks KPO tasks that read/write gs://$BUCKET.
+
+### Commands (what I ran)
+
+#### 0) Pre-reqs I relied on
+```bash
+export PROJECT_ID=<gcp-project-id>
+export BUCKET=<terraform output bucket_name>   # e.g., rna-dev-9c91
+kubectl get ns rnaseq >/dev/null || kubectl create ns rnaseq
+```
+
+#### 1) Annotate K8s ServiceAccount → map to GCP SA
+```bash
+kubectl -n rnaseq annotate serviceaccount airflow-runner \
+  iam.gke.io/gcp-service-account="airflow-bucket-rw@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --overwrite
+kubectl -n rnaseq get sa airflow-runner -o yaml | grep -A1 iam.gke.io/gcp-service-account
+```
+
+#### 2) IAM trust binding (Workload Identity)
+```bash
+gcloud services enable iamcredentials.googleapis.com --project "$PROJECT_ID"
+
+gcloud iam service-accounts add-iam-policy-binding \
+  "airflow-bucket-rw@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --role roles/iam.workloadIdentityUser \
+  --member "serviceAccount:${PROJECT_ID}.svc.id.goog[rnaseq/airflow-runner]" \
+  --project "$PROJECT_ID"
+
+gcloud iam service-accounts get-iam-policy \
+  "airflow-bucket-rw@${PROJECT_ID}.iam.gserviceaccount.com" --project "$PROJECT_ID" \
+  | grep -A2 workloadIdentityUser
+```
+
+#### 3) Sanity: confirm cluster WI pool (should equal ${PROJECT_ID}.svc.id.goog)
+```bash
+gcloud container clusters describe rnaseq-dev \
+  --region northamerica-northeast1 --project "$PROJECT_ID" \
+  --format='value(workloadIdentityConfig.workloadPool)'
+```
+
+#### 4) Run a WI test pod (Pod YAML; avoids kubectl run flag mismatch)
+```bash
+cat <<'EOF' | kubectl apply -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: wi-test
+  namespace: rnaseq
+spec:
+  serviceAccountName: airflow-runner
+  restartPolicy: Never
+  containers:
+  - name: gcloud
+    image: google/cloud-sdk:slim
+    command: ["bash","-lc"]
+    args:
+      - |
+        set -euo pipefail
+        echo "Testing WI against gs://$BUCKET"
+        gsutil ls -d "gs://$BUCKET"
+        date | gsutil cp - "gs://$BUCKET/tmp/wi-test.txt"
+        gsutil ls -l "gs://$BUCKET/tmp/wi-test.txt"
+EOF
+
+kubectl -n rnaseq wait --for=condition=Ready pod/wi-test --timeout=180s || true
+kubectl -n rnaseq logs wi-test | sed -n '1,200p'
+```
+
+#### (Optional) Prove the pod identity
+```
+kubectl -n rnaseq exec wi-test -- \
+  curl -s -H "Metadata-Flavor: Google" \
+  http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email \
+  | sed -n '1,1p'
+# expect: airflow-bucket-rw@${PROJECT_ID}.iam.gserviceaccount.com
+```
+
+#### 5) Clean up the test pod (optional)
+kubectl -n rnaseq delete pod wi-test --ignore-not-found
+
+---
+
+### Terraform hardening (so WI stays configured)
+Add this to terraform/gcs/main.tf if not already present; then apply:
+```hcl
+# Attach Workload Identity trust from K8s SA → GCP SA
+resource "google_service_account_iam_member" "airflow_wi" {
+  service_account_id = google_service_account.airflow.name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "serviceAccount:${var.project_id}.svc.id.goog[rnaseq/airflow-runner]"
+}
+```
+
+Run plan/apply and capture logs:
+```bash
+cd terraform/gcs
+terraform plan -var project_id=$PROJECT_ID | tee ../../docs/tf-plan-wi.txt
+terraform apply -auto-approve -var project_id=$PROJECT_ID | tee ../../docs/tf-apply-wi.txt
+```
+
+---
+
+### Proof
+
+- kubectl -n rnaseq logs wi-test shows:
+    - gsutil ls -d gs://$BUCKET succeeds.
+    - wi-test.txt uploaded to gs://$BUCKET/tmp/… and listed with size/timestamp.
+- gcloud iam service-accounts get-iam-policy … includes roles/iam.workloadIdentityUser for serviceAccount:${PROJECT_ID}.svc.id.goog[rnaseq/airflow-runner].
+- (Optional) metadata server query returns the GCP SA email above.
+
+--- 
+
+### Issues → Fixes
+
+- kubectl run error unknown flag: --service-account → used Pod YAML (or --overrides) to set spec.serviceAccountName.
+- Earlier name-resolution / kubeconfig templating issues → avoided by testing with a simple pod inside cluster.
+- Exit 137 (OOM) on GKE Autopilot earlier → set requests/limits appropriately in KPO tasks (and Autopilot adjusted).
+
+### Next
+- Set service_account_name="airflow-runner" on all KPO tasks.
+- Remove any lingering ADC JSON files/secret mounts from Airflow.
+- (Optional) Add a tiny “WI smoke” taskgroup in the DAG that writes/reads tmp/wi-smoke.txt in the bucket on each deploy.
