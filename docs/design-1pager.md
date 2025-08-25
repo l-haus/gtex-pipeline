@@ -6,7 +6,7 @@ flowchart LR
     R1[(GCS raw reads\n gs://<bucket>/raw/...)]
   end
 
-  subgraph AF[Airflow (DAG: rnaseq_mvp)]
+  subgraph AF[(Airflow DAG: rnaseq_mvp)]
     A0[[start]]
     A1[fetch_metadata\n(PythonOperator)]
     A2[stage_reads\n(PythonOperator)]
