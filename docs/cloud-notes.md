@@ -826,3 +826,44 @@ terraform apply -auto-approve -var project_id=$PROJECT_ID | tee ../../docs/tf-ap
 - Set service_account_name="airflow-runner" on all KPO tasks.
 - Remove any lingering ADC JSON files/secret mounts from Airflow.
 - (Optional) Add a tiny “WI smoke” taskgroup in the DAG that writes/reads tmp/wi-smoke.txt in the bucket on each deploy.
+
+
+## 2025-08-25 — Day 5 (part 2): Airflow → GKE smoke test with KPO
+
+### Context:
+Goal was to prove Airflow (Astro dev container) can talk to the GKE Autopilot cluster using a kubeconfig and successfully launch a pod with the KubernetesPodOperator. This is the minimal end-to-end integration test before swapping real pipeline steps (FastQC) into GKE.
+
+### Setup / Commands:
+1. On host: confirm kubeconfig works
+KUBECONFIG=.kube/config.token kubectl -n rnaseq get pods
+2.	Copy kubeconfig into Airflow scheduler container
+SCH=$(docker ps –format ‘{{.ID}} {{.Names}}’ | awk ‘$2 ~ /scheduler/ {print $1}’)
+docker cp .kube/config.token “$SCH”:/usr/local/airflow/.kube/config.token
+3.	Update Airflow connection ‘k8s_gke’ extras (UI):
+{
+“extra__kubernetes__in_cluster”:“False”,
+“extra__kubernetes__kube_config_path”:”/usr/local/airflow/.kube/config.token”,
+“extra__kubernetes__namespace”:“rnaseq”
+}
+astro dev restart
+4.	Add dags/kpo_smoke.py (busybox pod with explicit resources)
+5.	Trigger and watch
+astro dev bash –scheduler -c “airflow dags trigger kpo_smoke”
+KUBECONFIG=.kube/config.token kubectl -n rnaseq get pods -l dag_id=kpo_smoke -o wide
+KUBECONFIG=.kube/config.token kubectl -n rnaseq logs -l dag_id=kpo_smoke –all-containers –tail=40
+
+### Proof:
+- Airflow DAG kpo_smoke turned green in the UI.
+- Pod logs show “hello-from-kpo”.
+- kubectl confirmed pod reached Completed state in namespace rnaseq.
+
+### Issues → Fixes:
+- Initially pods were stuck in “Pending” with “Pod not yet started.”
+- Cause: Autopilot cluster requires explicit resource requests/limits and Docker Hub pulls are flaky.
+- Fix: switched image to registry.k8s.io/busybox:1.36.1, added small CPU/memory requests/limits, and increased startup_timeout_seconds.
+
+### Next:
+- Swap in real FastQC image from Artifact Registry:
+northamerica-northeast1-docker.pkg.dev/gtex-pipeline/rnaseq/fastqc:0.12.1
+- If ImagePullBackOff → grant node SA roles/artifactregistry.reader.
+- Rebuild rnaseq_mvp DAG to run QC stage via KPO on GKE.
