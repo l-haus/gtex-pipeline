@@ -1,3 +1,4 @@
+```mermaid
 flowchart LR
   %% Lanes
   subgraph SRC[Sources]
@@ -65,3 +66,4 @@ flowchart LR
     Backfill: date-range param; markers guard
     Auth: Workload Identity (no keys)
   end
+```
