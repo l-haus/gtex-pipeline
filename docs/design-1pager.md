@@ -2,7 +2,7 @@
 flowchart LR
  subgraph SRC["Sources"]
         M1["GTEx or recount3 metadata"]
-        R1["GCS raw reads\n gs://bucket/raw/..."]
+        R1["GCS raw reads gs://bucket/raw/..."]
   end
  subgraph TG["TaskGroup per-sample mapping"]
         Q1["qc - KPO FastQC"]
