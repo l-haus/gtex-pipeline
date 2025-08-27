@@ -1079,3 +1079,213 @@ Next (tomorrow)
 	•	Add idempotency: skip if output exists; write a small lineage JSON per sample.
 	•	Add MultiQC aggregator task (KPO) and a tiny track_to_wandb step.
 
+
+————————————————————————————————————
+PROJECT: RNA-seq MVP on GCP/GKE via Airflow KPO
+DATE: today (Week 3 Day 2)
+GOAL FOR THE DAY
+	•	Add MultiQC on GKE after FastQC.
+	•	Stabilize KPO behavior (RBAC, resources, logs).
+	•	Stop the earlier “pod not found” / PEP 668 / Jinja mishaps.
+————————————————————————————————————
+
+WHAT CHANGED TODAY (HIGH LEVEL)
+	•	Added a MultiQC KubernetesPodOperator task to the qc_on_gke TaskGroup.
+	•	Switched to using Airflow params for GCS paths in KPO Jinja templates (safer than var.value).
+	•	Kept pods after completion for debugging (is_delete_operator_pod=False).
+	•	Worked around Debian PEP 668 by creating a virtualenv in the MultiQC pod and installing multiqc+kaleido there.
+	•	Fixed quoting and variable expansion gotchas that were breaking bash with “set -euo pipefail”.
+
+————————————————————————————————————
+ISSUES ENCOUNTERED AND ROOT CAUSES (WITH FIXES)
+	1.	Airflow Jinja VariableNotFound (VARIABLE_NOT_FOUND: GCS_BUCKET)
+Cause:
+
+	•	KPO arguments were templated against var.value.* but the Variables did not exist.
+Fix:
+	•	Moved to params for operators and provided a default dag-level params.
+	•	For Python tasks, used your _v() helper to default to known bucket/prefix.
+
+	2.	403 Forbidden when KPO tried to list pods
+Cause:
+
+	•	The workload identity service account airflow-runner in namespace rnaseq lacked RBAC to list/read/create pods.
+Fix:
+	•	Created a Role (pods + pods/log: get,list,watch,create,delete) and RoleBinding to serviceaccount rnaseq:airflow-runner.
+
+	3.	404 “pods  not found” during cleanup/logging
+Cause:
+
+	•	The operator tried to fetch logs/read the pod after it was gone, or name changed, or cleanup raced.
+Fix:
+	•	For now set is_delete_operator_pod=False (and effectively “keep pod” after completion) to make log retrieval deterministic for debugging.
+
+	4.	Pod scheduling / exec format error / insufficient resources
+Symptoms:
+
+	•	“exec /usr/bin/bash: exec format error” and “Insufficient cpu/memory” events on Autopilot.
+Causes:
+	•	Image architecture mismatch risk and tight requests/limits.
+	•	Autopilot resizing annotations observed.
+Fixes:
+	•	Used amd64-friendly cloud-sdk images.
+	•	Modest resources:
+FastQC: requests cpu=500m mem=1Gi eph=2Gi; limits cpu=1 mem=2Gi eph=4Gi
+MultiQC: requests cpu=250m mem=1Gi eph=1Gi; limits cpu=1 mem=2Gi eph=2Gi
+	•	Result: pods scheduled cleanly.
+
+	5.	PEP 668 “externally-managed-environment” when pip installing inside google/cloud-sdk
+Cause:
+
+	•	Debian’s pip protections forbid system-site installs.
+Fix:
+	•	apt-get install python3-venv ca-certificates
+	•	python3 -m venv /opt/venv
+	•	/opt/venv/bin/pip install –no-cache-dir multiqc==1.29 kaleido==0.2.1
+	•	Use PATH=”/opt/venv/bin:${PATH}” multiqc …
+
+	6.	MultiQC fastqc module threw ChromeNotFoundError
+Cause:
+
+	•	Plotly export needs a rendering backend. Kaleido satisfies this headlessly but wasn’t present initially.
+Fix:
+	•	Installed kaleido==0.2.1 alongside multiqc in the venv. Error cleared.
+
+	7.	Invalid requirement due to curly quotes
+Symptom:
+
+	•	ERROR: Invalid requirement: “multiqc==1.29”
+Cause:
+	•	Fancy quotes from copy/paste.
+Fix:
+	•	Use straight quotes or no quotes: /opt/venv/bin/pip install multiqc==1.29
+
+	8.	“bash: line 3: rna: unbound variable”
+Cause:
+
+	•	Used shell-style “$” in front of literal strings that were supposed to be templated values (e.g., “$rna-dev-9c91”), with “set -u”.
+Fix:
+	•	Use pure Jinja in KPO arguments:
+echo “Bucket={{ params.GCS_BUCKET }} Prefix={{ params.GCS_QC_PREFIX }}”
+	•	Or export environment variables explicitly if you want $VARS.
+
+	9.	Earlier GKE kubeconfig path / token issues (recap)
+
+	•	You used an explicit path (KUBECONFIG=.kube/config.token) and it worked.
+	•	Keep that approach inside the Airflow container when testing with kubectl.
+
+————————————————————————————————————
+CURRENT WORKING CONFIG (ESSENTIAL BITS)
+
+FastQC (KPO)
+	•	Image: gcr.io/google.com/cloudsdktool/google-cloud-cli:slim
+	•	Steps:
+apt-get minimal deps + download FastQC 0.12.1 zip
+gsutil cp gs:/// to /work/in
+/opt/FastQC/fastqc … → /work/out
+gsutil -m cp /work/out/* gs:///<qc_prefix>/
+	•	Resources: requests 500m/1Gi/2Gi, limits 1/2Gi/4Gi
+	•	Labels: pipeline=rnaseq, step=qc, sample=demo
+	•	SA: airflow-runner, ns: rnaseq
+	•	is_delete_operator_pod: False (for now)
+
+MultiQC (KPO)
+	•	Image: google/cloud-sdk:latest
+	•	Steps:
+apt-get python3-venv
+python3 -m venv /opt/venv
+/opt/venv/bin/pip install multiqc==1.29 kaleido==0.2.1
+gsutil -m cp “gs://{{ params.GCS_BUCKET }}/{{ params.GCS_QC_PREFIX }}/*” /work/qc/ || true
+PATH=”/opt/venv/bin:$PATH” multiqc /work/qc -o /work/report || true
+if present, upload /work/report/multiqc_report.html to gs://{{ params.GCS_BUCKET }}/{{ params.GCS_QC_PREFIX }}/multiqc_report.html
+	•	Resources: requests 250m/1Gi/1Gi, limits 1/2Gi/2Gi
+	•	Labels: pipeline=rnaseq, step=multiqc, sample=demo
+	•	SA: airflow-runner, ns: rnaseq
+	•	is_delete_operator_pod: False (for now)
+	•	Params passed in operator: GCS_BUCKET, GCS_QC_PREFIX
+
+Airflow params (dag-level)
+	•	GCS_BUCKET: rna-dev-9c91
+	•	GCS_RAW_SAMPLE: raw/demo/test.fastq
+	•	GCS_QC_PREFIX: processed/qc/demo
+
+Airflow Variables
+	•	You also retain _v(“GCS_BUCKET”, …) etc. for Python tasks to work even if params aren’t passed.
+
+RBAC snapshot (namespace rnaseq)
+	•	ServiceAccount: airflow-runner (Workload Identity bound to a GSA with storage.viewer/storage.objectAdmin as needed)
+	•	Role rnaseq-kpo-runner: resources pods,pods/log verbs get,list,watch,create,delete
+	•	RoleBinding to SA airflow-runner
+
+————————————————————————————————————
+VERIFICATION DONE
+
+Cluster
+	•	kubectl -n rnaseq get pods -l dag_id=rnaseq_mvp -o wide –show-labels
+Showed both pods with expected labels; MultiQC transitioned to Completed on the final successful run.
+
+Logs
+	•	FastQC pod logs show successful FastQC and GCS uploads.
+	•	MultiQC logs showed it discovered the FastQC report, then produced output after kaleido install.
+
+GCS
+	•	gsutil ls -l gs:///processed/qc/demo/
+Shows FastQC outputs and (when generated) multiqc_report.html.
+
+————————————————————————————————————
+RECOMMENDATIONS (NEAR-TERM)
+	1.	Bake minimal images to drop apt/venv at runtime
+
+	•	fastqc: Debian/Ubuntu slim + curl + openjdk + perl + fastqc unpacked
+	•	multiqc: Python slim + multiqc==1.29 + kaleido==0.2.1 preinstalled
+	•	Push to Artifact Registry (northamerica-northeast1) and pin immutable digests.
+
+	2.	Stabilize params and outputs
+
+	•	Keep KPO arguments pure Jinja (no shell $ for params).
+	•	Add retries=2 and retry_delay to both KPO tasks.
+
+	3.	Add safe GCS manifest tasks (no shell gsutil in scheduler)
+
+	•	Use google-cloud-storage in a Python @task to list and write a manifest (_manifest.txt) to the qc prefix.
+	•	Optionally log a one-line W&B pointer artifact to the manifest.
+
+	4.	After two clean runs, flip is_delete_operator_pod=True
+
+	•	Once stable, let K8s clean pods to avoid clutter and suppress the previous 404s.
+
+	5.	Tag outputs with a run id
+
+	•	Write outputs under processed/qc/demo/<run_ts>/ and optionally add a latest/ pointer object. Easier diffing and rollback.
+
+————————————————————————————————————
+USEFUL COMMANDS USED OR TO KEEP HANDY
+
+Airflow params/vars (inside webserver or via UI/API)
+	•	airflow variables set GCS_BUCKET rna-dev-9c91
+	•	airflow variables set GCS_RAW_SAMPLE raw/demo/test.fastq
+	•	airflow variables set GCS_QC_PREFIX processed/qc/demo
+
+Kubernetes (from inside your Airflow env with KUBECONFIG set)
+	•	kubectl -n rnaseq get pods -l dag_id=rnaseq_mvp -o wide –show-labels
+	•	kubectl -n rnaseq logs  –tail=200
+	•	kubectl -n rnaseq describe pod 
+
+GCS quick checks
+	•	gsutil ls -l gs://rna-dev-9c91/processed/qc/demo/
+	•	gsutil cat gs://rna-dev-9c91/processed/qc/demo/_manifest.txt
+
+Git (plain text)
+	•	git add dags/rnaseq_mvp.py
+	•	git commit -m “w3d2: add MultiQC KPO with venv; fix Jinja params; keep pods; resource tuning; prep for manifest”
+	•	git push
+
+————————————————————————————————————
+OPEN ITEMS FOR TOMORROW
+	•	Build and push tiny fastqc and multiqc images to Artifact Registry and switch KPOs to them.
+	•	Add emit_qc_manifest() + log_qc_manifest_to_wandb() tasks and wire after MultiQC.
+	•	Add on_finish_action=“keep_pod” or “delete_pod” as policy once stable; align with is_delete_operator_pod.
+	•	Consider adding a tiny “QC existence check” task that fails fast if expected outputs missing (SLA guard).
+
+————————————————————————————————————
+
