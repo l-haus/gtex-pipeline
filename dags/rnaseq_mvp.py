@@ -7,7 +7,7 @@ from airflow.exceptions import AirflowSkipException
 from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
 from airflow.utils.task_group import TaskGroup
 from google.cloud.storage import Client as GCSClient
-from kubernetes.client import V1ResourceRequirements
+from kubernetes.client import V1ResourceRequirements, V1SecurityContext, V1Capabilities
 
 GCS_BUCKET = os.getenv("GCS_BUCKET")
 PREFIX_TMP = "tmp/"
@@ -24,6 +24,11 @@ def _gcs_client():
     schedule=None,
     catchup=False,
     tags=["dev"],
+    params={
+        "GCS_BUCKET": "rna-dev-9c91",
+        "GCS_RAW_SAMPLE": "raw/demo/test.fastq",
+        "GCS_QC_PREFIX": "processed/qc/demo",
+    },
 )
 def rnaseq_mvp():
     @task(retries=3, retry_delay=timedelta(minutes=2))
@@ -66,44 +71,42 @@ def rnaseq_mvp():
     with TaskGroup(group_id="qc_on_gke") as qc_on_gke:
         fastqc_kpo = KubernetesPodOperator(
             task_id="fastqc_gke",
-            kubernetes_conn_id="k8s_gke",           # defined in .env
+            kubernetes_conn_id="k8s_gke",
             name="fastqc-gke",
             namespace="rnaseq",
-            service_account_name="airflow-runner",  # KSA → GSA via Workload Identity
-            image="google/cloud-sdk:latest",        # includes gsutil + gcloud
-            # Run a shell script inside the container
-            cmds=["bash","-lc"],
-            arguments=[f"""
-            set -euo pipefail
-            echo "Bucket={GCS_BUCKET}  Sample={GCS_RAW_SAMPLE}"
+            service_account_name="airflow-runner",
+            image="gcr.io/google.com/cloudsdktool/google-cloud-cli:slim",  # has gsutil; amd64
+            cmds=["bash", "-lc"],
+            arguments=[r"""
+        set -euo pipefail
+        echo "Bucket={{ params.GCS_BUCKET }}  Sample={{ params.GCS_RAW_SAMPLE }}"
 
-            # 1) Install FastQC at runtime (avoids private registry pulls)
-            apt-get update
-            apt-get install -y --no-install-recommends ca-certificates curl unzip openjdk-17-jre-headless perl
-            rm -rf /var/lib/apt/lists/*
-            curl -fsSL -o /tmp/fastqc.zip https://www.bioinformatics.babraham.ac.uk/projects/fastqc/fastqc_v0.12.1.zip
-            unzip -q /tmp/fastqc.zip -d /opt && chmod +x /opt/FastQC/fastqc
+        # Install minimal deps + FastQC
+        apt-get update
+        apt-get install -y --no-install-recommends ca-certificates curl unzip openjdk-17-jre-headless perl
+        rm -rf /var/lib/apt/lists/*
+        curl -fsSL -o /tmp/fastqc.zip https://www.bioinformatics.babraham.ac.uk/projects/fastqc/fastqc_v0.12.1.zip
+        unzip -q /tmp/fastqc.zip -d /opt && chmod +x /opt/FastQC/fastqc
 
-            # 2) Get input from GCS
-            mkdir -p /work/in /work/out
-            gsutil cp "gs://{GCS_BUCKET}/{GCS_RAW_SAMPLE}" /work/in/test.fastq
+        # I/O
+        mkdir -p /work/in /work/out
+        gsutil cp "gs://{{ params.GCS_BUCKET }}/{{ params.GCS_RAW_SAMPLE }}" /work/in/test.fastq
 
-            # 3) Run FastQC
-            /opt/FastQC/fastqc /work/in/test.fastq --outdir /work/out --quiet
+        # Run
+        /opt/FastQC/fastqc /work/in/test.fastq --outdir /work/out --quiet
 
-            # 4) Upload results to GCS
-            gsutil -m cp /work/out/* "gs://{GCS_BUCKET}/{GCS_QC_PREFIX}/"
-            gsutil ls -l "gs://{GCS_BUCKET}/{GCS_QC_PREFIX}/"
-            """],
-            get_logs=True,                          # stream pod logs back to Airflow
-            is_delete_operator_pod=True,            # clean up pod after success
+        # Upload results
+        gsutil -m cp /work/out/* "gs://{{ params.GCS_BUCKET }}/{{ params.GCS_QC_PREFIX }}/"
+        gsutil ls -l "gs://{{ params.GCS_BUCKET }}/{{ params.GCS_QC_PREFIX }}/"
+        """],
+            get_logs=True,
+            is_delete_operator_pod=False,
             container_resources=V1ResourceRequirements(
-              requests={"cpu": "1", "memory": "3Gi", "ephemeral-storage": "4Gi"},
-              limits={"cpu": "2", "memory": "4Gi", "ephemeral-storage": "4Gi"},
+                requests={"cpu": "500m", "memory": "1Gi", "ephemeral-storage": "2Gi"},
+                limits={"cpu": "1", "memory": "2Gi", "ephemeral-storage": "4Gi"},
             ),
-        )
-
-
+            labels={"pipeline": "rnaseq", "step": "qc", "sample": "demo"},
+    ),
     keys = list_tmp_keys(GCS_BUCKET, PREFIX_TMP)
     marker = ensure_marker.expand(key=keys)
     #log_to_wandb(keys)

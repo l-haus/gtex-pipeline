@@ -1,0 +1,33 @@
+# k8s/rbac-airflow-kpo.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: airflow-kpo
+  namespace: rnaseq
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get","list","watch","create","delete"]
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get","list","watch"]
+- apiGroups: [""]
+  resources: ["pods/exec"]
+  verbs: ["create","get"]
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create","patch","update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: airflow-kpo-binding
+  namespace: rnaseq
+subjects:
+- kind: ServiceAccount
+  name: airflow-runner
+  namespace: rnaseq
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: airflow-kpo

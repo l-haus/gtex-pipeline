@@ -867,3 +867,215 @@ KUBECONFIG=.kube/config.token kubectl -n rnaseq logs -l dag_id=kpo_smoke –all-
 northamerica-northeast1-docker.pkg.dev/gtex-pipeline/rnaseq/fastqc:0.12.1
 - If ImagePullBackOff → grant node SA roles/artifactregistry.reader.
 - Rebuild rnaseq_mvp DAG to run QC stage via KPO on GKE.
+
+
+Heck yes—today was a gauntlet. Here’s a clean, verbose log you can drop straight into docs/cloud-notes.md.
+
+⸻
+
+2025-08-26 — Week 3 Day 1: Airflow → GKE (KPO) + FastQC on GCS (Workload Identity + RBAC fixes)
+
+Goal
+Run a real KubernetesPodOperator task on GKE Autopilot that:
+	1.	pulls a FASTQ from GCS,
+	2.	runs FastQC,
+	3.	writes results back to GCS,
+with Workload Identity and namespace-scoped RBAC.
+
+Environment snapshot
+
+PROJECT_ID=gtex-pipeline
+REGION=northamerica-northeast1
+CLUSTER=rnaseq-dev (GKE Autopilot)
+NAMESPACE=rnaseq
+K8s SA: airflow-runner (bound to WI)
+GCS bucket: rna-dev-9c91
+
+⸻
+
+What I ran (chronological, with fixes)
+	1.	Kubeconfig for the Astro scheduler (out-of-cluster)
+
+	•	Problem: gcloud ... get-credentials inside the container → “Permission denied” writing ~/.kube.
+	•	Fix: Generate kubeconfig outside, then place a readable copy inside Astro’s working dir and tell Airflow to use that explicit path.
+
+# On host: ensure config exists/works
+gcloud container clusters get-credentials "$CLUSTER" --region "$REGION" --project "$PROJECT_ID"
+kubectl --context "gke_${PROJECT_ID}_${REGION}_${CLUSTER}" get ns | head
+
+# Copy the working kubeconfig into the Astro project (or mount it)
+cp ~/.kube/config .kube/config.token
+
+	2.	Airflow connection: point to that kubeconfig (NOT in-cluster)
+
+	•	Connection: k8s_gke
+	•	Extras (final):
+
+extra__kubernetes__in_cluster=False
+extra__kubernetes__kube_config_path=/usr/local/airflow/.kube/config.token
+extra__kubernetes__namespace=rnaseq
+
+(Placed the file at /usr/local/airflow/.kube/config.token in the container; if needed, copy/mount from .kube/config.token in the repo.)
+	3.	Workload Identity sanity check (gsutil as the KSA)
+
+	•	First attempts with kubectl run --service-account flags failed (flag not supported).
+	•	Fix: create an explicit pod using a manifest that sets serviceAccountName: airflow-runner.
+
+cat > k8s/wi-test.yaml <<'YAML'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: wi-test
+  namespace: rnaseq
+spec:
+  serviceAccountName: airflow-runner
+  restartPolicy: Never
+  containers:
+  - name: gcloud
+    image: google/cloud-sdk:slim
+    command: ["bash","-lc"]
+    args:
+      - |
+        set -euxo pipefail
+        /usr/bin/gsutil ls gs://$BUCKET/tmp/ || true
+    env:
+    - name: BUCKET
+      value: rna-dev-9c91
+YAML
+
+kubectl apply -f k8s/wi-test.yaml
+kubectl -n rnaseq logs -f pod/wi-test | sed -n '1,120p'
+kubectl -n rnaseq delete pod/wi-test --ignore-not-found
+
+	•	Result: gsutil authenticated via WI (no ADC json mounted).
+
+	4.	RBAC: allow the operator to create/read/list/delete pods (and read logs)
+
+	•	Error seen: Forbidden: User "system:serviceaccount:rnaseq:airflow-runner" cannot list resource "pods" in namespace "rnaseq".
+	•	Fix: bind a Role with pod + pod/log verbs to the KSA.
+
+cat > k8s/rbac-airflow-runner.yaml <<'YAML'
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: airflow-runner-role
+  namespace: rnaseq
+rules:
+- apiGroups: [""]
+  resources: ["pods","pods/log"]
+  verbs: ["get","list","watch","create","delete"]
+- apiGroups: ["batch"]
+  resources: ["jobs"]
+  verbs: ["get","list","watch","create","delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: airflow-runner-rb
+  namespace: rnaseq
+subjects:
+- kind: ServiceAccount
+  name: airflow-runner
+  namespace: rnaseq
+roleRef:
+  kind: Role
+  name: airflow-runner-role
+  apiGroup: rbac.authorization.k8s.io
+YAML
+
+kubectl apply -f k8s/rbac-airflow-runner.yaml
+# Sanity:
+kubectl -n rnaseq auth can-i list pods --as=system:serviceaccount:rnaseq:airflow-runner
+
+	5.	KPO smoke test (hello world)
+
+	•	After fixing kubeconfig + RBAC, the simple kpo_smoke finally succeeded.
+
+	6.	FastQC KPO: Jinja variable errors → switch to operator params
+
+	•	Error: VARIABLE_NOT_FOUND: {'key': 'GCS_BUCKET'} and later UndefinedError: 'dict object' has no attribute 'GCS_BUCKET'.
+	•	Root cause: mixing var.value.* and params / missing Variables.
+	•	Fix: pass everything through params={...} and reference in the script with {{ params.KEY }}.
+	•	Final operator (essentials):
+
+fastqc_gke = KubernetesPodOperator(
+  task_id="fastqc_gke",
+  kubernetes_conn_id="k8s_gke",
+  name="fastqc-gke",
+  namespace="rnaseq",
+  service_account_name="airflow-runner",
+  image="google/cloud-sdk:latest",
+  cmds=["bash","-lc"],
+  arguments=[r"""
+    set -euo pipefail
+    echo "Bucket={{ params.GCS_BUCKET }}  Sample={{ params.GCS_RAW_SAMPLE }}"
+
+    # Install minimal deps + FastQC (temporary; will replace with prebaked image)
+    apt-get update
+    apt-get install -y --no-install-recommends ca-certificates curl unzip openjdk-17-jre-headless perl
+    rm -rf /var/lib/apt/lists/*
+    curl -fsSL -o /tmp/fastqc.zip https://www.bioinformatics.babraham.ac.uk/projects/fastqc/fastqc_v0.12.1.zip
+    unzip -q /tmp/fastqc.zip -d /opt && chmod +x /opt/FastQC/fastqc
+
+    mkdir -p /work/in /work/out
+    gsutil cp "gs://{{ params.GCS_BUCKET }}/{{ params.GCS_RAW_SAMPLE }}" /work/in/test.fastq
+
+    /opt/FastQC/fastqc /work/in/test.fastq --outdir /work/out --quiet
+
+    gsutil -m cp /work/out/* "gs://{{ params.GCS_BUCKET }}/{{ params.GCS_QC_PREFIX }}/"
+    gsutil ls -l "gs://{{ params.GCS_BUCKET }}/{{ params.GCS_QC_PREFIX }}/"
+  """],
+  params={
+    "GCS_BUCKET": "rna-dev-9c91",
+    "GCS_RAW_SAMPLE": "raw/demo/test.fastq",
+    "GCS_QC_PREFIX": "processed/qc/demo",
+  },
+  get_logs=True,
+  is_delete_operator_pod=True,
+  container_resources=V1ResourceRequirements(
+    requests={"cpu": "500m", "memory": "2Gi", "ephemeral-storage": "1Gi"},
+    limits   ={"cpu": "1",    "memory": "2Gi", "ephemeral-storage": "1Gi"},
+  ),
+)
+
+	7.	Scheduling / resources
+
+	•	Error: FailedScheduling - Insufficient cpu/memory and one exec /usr/bin/bash: exec format error during early attempts.
+	•	Fix: reduce requests to something Autopilot can place (500m / 2Gi / 1Gi-ephem); the exec-format error did not recur.
+	•	Note: Autopilot may add an annotation showing adjusted requests/limits.
+
+	8.	404 during KPO cleanup (pod already deleted)
+
+	•	Error: pods "<name>" not found during cleanup / Istio check path.
+	•	Likely benign race: deletion vs. later read.
+	•	Mitigation used: simply re-ran and it succeeded. (If it recurs during dev, set is_delete_operator_pod=False temporarily.)
+
+	9.	Result: FastQC on GKE works end-to-end
+
+	•	Reads from: gs://rna-dev-9c91/raw/demo/test.fastq
+	•	Writes to: gs://rna-dev-9c91/processed/qc/demo/ (HTML + ZIP)
+	•	Logs streamed into Airflow; pod cleaned up.
+
+⸻
+
+Proof
+	•	kubectl -n rnaseq get pods shows transient pod during the run; post-run, no pods (cleaned).
+	•	gsutil ls -l gs://rna-dev-9c91/processed/qc/demo/ lists FastQC outputs.
+	•	Airflow run: rnaseq_mvp.qc_on_gke.fastqc_gke green; log shows gsutil cp of outputs and ls -l listing.
+
+⸻
+
+Issues → Fixes (quick index)
+	•	Couldn’t write kubeconfig in container → use explicit path and point Airflow connection to it.
+	•	Forbidden listing pods → add Role/RoleBinding for pods + pods/log (and batch/jobs).
+	•	Jinja VARIABLE_NOT_FOUND / UndefinedError → pass via params={...} and reference {{ params.* }} consistently.
+	•	Insufficient CPU/memory on Autopilot → lower requests to 500m/2Gi/1Gi-ephem.
+	•	KPO 404 on cleanup → benign race; re-run OK (toggle is_delete_operator_pod=False during debugging if needed).
+
+⸻
+
+Next (tomorrow)
+	•	Build a prebaked image (FastQC + gsutil) and push to Artifact Registry to avoid apt/curl at runtime.
+	•	Add idempotency: skip if output exists; write a small lineage JSON per sample.
+	•	Add MultiQC aggregator task (KPO) and a tiny track_to_wandb step.
+
