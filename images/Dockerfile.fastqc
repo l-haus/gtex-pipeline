@@ -1,0 +1,26 @@
+FROM gcr.io/google.com/cloudsdktool/google-cloud-cli:471.0.0-slim
+
+ARG UID=1001
+ARG GID=1001
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates curl unzip openjdk-17-jre-headless perl && \
+    rm -rf /var/lib/apt/lists/* && \
+    curl -fsSL -o /tmp/fastqc.zip \
+      https://www.bioinformatics.babraham.ac.uk/projects/fastqc/fastqc_v0.12.1.zip && \
+    unzip -q /tmp/fastqc.zip -d /opt && \
+    chmod +x /opt/FastQC/fastqc && \
+    ln -s /opt/FastQC/fastqc /usr/local/bin/fastqc && \
+    rm -f /tmp/fastqc.zip
+
+RUN groupadd -g "${GID}" app && \
+    useradd -m -u "${UID}" -g "${GID}" app && \
+    mkdir -p /work && \
+    chown -R app:app /work /home/app /opt/FastQC
+
+WORKDIR /work
+USER app:app
+
+ENTRYPOINT ["bash","-lc"]

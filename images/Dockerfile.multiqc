@@ -1,0 +1,25 @@
+FROM gcr.io/google.com/cloudsdktool/google-cloud-cli:471.0.0-slim
+
+ARG UID=1001
+ARG GID=1001
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    VIRTUAL_ENV=/opt/venv \
+    PATH="/opt/venv/bin:${PATH}"
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends python3-venv ca-certificates && \
+    rm -rf /var/lib/apt/lists/* && \
+    python3 -m venv "${VIRTUAL_ENV}" && \
+    "${VIRTUAL_ENV}/bin/pip" install --no-cache-dir --upgrade pip && \
+    "${VIRTUAL_ENV}/bin/pip" install --no-cache-dir multiqc==1.29 kaleido==0.2.1
+
+RUN groupadd -g "${GID}" app && \
+    useradd -m -u "${UID}" -g "${GID}" app && \
+    mkdir -p /work && \
+    chown -R app:app /opt/venv /work /home/app
+
+WORKDIR /work
+USER app:app
+
+ENTRYPOINT ["bash","-lc"]

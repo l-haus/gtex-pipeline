@@ -14,18 +14,22 @@ def _v(key, default):
     try: return Variable.get(key)
     except Exception: return default
 
+PROJECT_ID = _v("PROJECT_ID", "gtex-pipeline")
 GCS_BUCKET     = _v("GCS_BUCKET",     "rna-dev-xxxx")
 GCS_RAW_SAMPLE = _v("GCS_RAW_SAMPLE", "raw/demo/test.fastq")
 GCS_QC_PREFIX  = _v("GCS_QC_PREFIX",  "processed/qc/demo")
+SAMPLE_ID = _v("SAMPLE_ID", "demo")
 
 PREFIX_TMP = "tmp/"
 MARKERS_PREFIX = "processed/markers/"
 
 
 common_params = dict(
+    PROJECT_ID=PROJECT_ID,
     GCS_BUCKET=GCS_BUCKET,
     GCS_RAW_SAMPLE=GCS_RAW_SAMPLE,
     GCS_QC_PREFIX=GCS_QC_PREFIX,
+    SAMPLE_ID=SAMPLE_ID,
 )
 
 def _gcs_client():
@@ -83,34 +87,20 @@ def rnaseq_mvp():
             name="fastqc-gke",
             namespace="rnaseq",
             service_account_name="airflow-runner",
-            image="gcr.io/google.com/cloudsdktool/google-cloud-cli:slim",  # has gsutil; amd64
-            cmds=["bash", "-lc"],
-            arguments=[r"""
-        set -euo pipefail
-        echo "Bucket={{ params.GCS_BUCKET }}  Sample={{ params.GCS_RAW_SAMPLE }}"
-
-        # Install minimal deps + FastQC
-        apt-get update
-        apt-get install -y --no-install-recommends ca-certificates curl unzip openjdk-17-jre-headless perl
-        rm -rf /var/lib/apt/lists/*
-        curl -fsSL -o /tmp/fastqc.zip https://www.bioinformatics.babraham.ac.uk/projects/fastqc/fastqc_v0.12.1.zip
-        unzip -q /tmp/fastqc.zip -d /opt && chmod +x /opt/FastQC/fastqc
-
-        # I/O
-        mkdir -p /work/in /work/out
-        gsutil cp "gs://{{ params.GCS_BUCKET }}/{{ params.GCS_RAW_SAMPLE }}" /work/in/test.fastq
-
-        # Run
-        /opt/FastQC/fastqc /work/in/test.fastq --outdir /work/out --quiet
-
-        # Upload results
-        gsutil -m cp /work/out/* "gs://{{ params.GCS_BUCKET }}/{{ params.GCS_QC_PREFIX }}/"
-        gsutil ls -l "gs://{{ params.GCS_BUCKET }}/{{ params.GCS_QC_PREFIX }}/"
-        """],
+            image = "northamerica-northeast1-docker.pkg.dev/{{ params.PROJECT_ID }}/rnaseq/fastqc:0.12.1",
+            cmds  = ["bash","-lc"],
+            arguments = [r"""
+              set -euo pipefail
+              echo "Bucket={{ params.GCS_BUCKET }}  Sample={{ params.GCS_RAW_SAMPLE }}"
+              mkdir -p /work/in /work/out
+              gsutil cp "gs://{{ params.GCS_BUCKET }}/{{ params.GCS_RAW_SAMPLE }}" /work/in/test.fastq
+              fastqc /work/in/test.fastq --outdir /work/out --quiet
+              gsutil -m cp /work/out/* "gs://{{ params.GCS_BUCKET }}/{{ params.GCS_QC_PREFIX }}/"
+              gsutil ls -l "gs://{{ params.GCS_BUCKET }}/{{ params.GCS_QC_PREFIX }}/"
+            """],
             params=common_params,
             get_logs=True,
             on_finish_action="keep_pod",
-            is_delete_operator_pod=False,
             reattach_on_restart=True,
             container_resources=V1ResourceRequirements(
                 requests={"cpu": "500m", "memory": "1Gi", "ephemeral-storage": "2Gi"},
@@ -125,35 +115,22 @@ def rnaseq_mvp():
             name="multiqc",
             namespace="rnaseq",
             service_account_name="airflow-runner",
-            image="google/cloud-sdk:471.0.0",
-            image_pull_policy="IfNotPresent",
+            image="northamerica-northeast1-docker.pkg.dev/{{ params.PROJECT_ID }}/rnaseq/multiqc:1.29.0-kaleido",
             cmds=["bash","-lc"],
             arguments=[r"""
-                set -euo pipefail
-                echo "Bucket={{ params.GCS_BUCKET }}  Prefix={{ params.GCS_QC_PREFIX }}"
-
-                # venv to avoid PEP 668
-                apt-get update
-                apt-get install -y --no-install-recommends python3-venv ca-certificates
-                rm -rf /var/lib/apt/lists/*
-                python3 -m venv /opt/venv
-                /opt/venv/bin/pip install --no-cache-dir multiqc==1.29 kaleido==0.2.1
-
-                mkdir -p /work/qc /work/report
-                gsutil -m cp "gs://{{ params.GCS_BUCKET }}/{{ params.GCS_QC_PREFIX }}/*" /work/qc/ || true
-
-                PATH="/opt/venv/bin:${PATH}" multiqc /work/qc -o /work/report || true
-
-                if [ -f /work/report/multiqc_report.html ]; then
-                  gsutil cp /work/report/multiqc_report.html "gs://{{ params.GCS_BUCKET }}/{{ params.GCS_QC_PREFIX }}/multiqc_report.html"
-                fi
-
-                echo ok | gsutil cp - "gs://{{ params.GCS_BUCKET }}/processed/markers/qc_${SAMPLE_ID:-demo}.done"
+              set -euo pipefail
+              echo "Bucket={{ params.GCS_BUCKET }}  Prefix={{ params.GCS_QC_PREFIX }}"
+              mkdir -p /work/qc /work/report
+              gsutil -m cp "gs://{{ params.GCS_BUCKET }}/{{ params.GCS_QC_PREFIX }}/*" /work/qc/ || true
+              multiqc /work/qc -o /work/report || true
+              if [ -f /work/report/multiqc_report.html ]; then
+                gsutil cp /work/report/multiqc_report.html "gs://{{ params.GCS_BUCKET }}/{{ params.GCS_QC_PREFIX }}/multiqc_report.html"
+              fi
+              echo ok | gsutil cp - "gs://{{ params.GCS_BUCKET }}/processed/markers/qc_{{ params.SAMPLE_ID }}.done"
             """],
             params=common_params,
             get_logs=True,
             on_finish_action="keep_pod",
-            is_delete_operator_pod=False,
             reattach_on_restart=True,
             container_resources=V1ResourceRequirements(
                 requests={"cpu": "250m", "memory": "1Gi", "ephemeral-storage": "1Gi"},
