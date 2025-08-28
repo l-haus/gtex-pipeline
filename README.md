@@ -3,11 +3,16 @@
 ## Quickstart (local dev with Astro)
 1. Prereqs: Docker + Buildx, gcloud, Astronomer CLI (astro).
 2. Configure Buildx
-3. Start Airflow: ```astro dev start```
+3. Start Airflow:
+```
+astro dev start
+```
     - UI: http://localhost:8080 (default: admin/airflow)
 4.	Set Airflow Variables (UI → Admin → Variables) or import:
-```astro dev bash
-airflow variables import /usr/local/airflow/dags/airflow_variables.example.json```
+```
+astro dev bash
+airflow variables import /usr/local/airflow/dags/airflow_variables.example.json
+```
 5.	Run DAG rnaseq_mvp manually.
 
 ## Build & push images to Artifact Registry
