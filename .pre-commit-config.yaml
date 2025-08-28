@@ -1,0 +1,25 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.5.7
+    hooks:
+      - id: ruff
+        name: ruff (lint + fixes)
+        args: ["--fix", "--show-fixes"]
+      - id: ruff-format
+        name: ruff (format)
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: check-yaml
+        exclude: ^k8s/
+
+      - id: check-yaml
+        name: check-yaml (k8s, multi-doc)
+        files: ^k8s/
+        args: [--allow-multiple-documents]
+
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: mixed-line-ending
+      - id: check-merge-conflict

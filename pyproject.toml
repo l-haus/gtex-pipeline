@@ -1,0 +1,26 @@
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+extend-exclude = [
+  ".git", ".venv", ".ruff_cache", ".mypy_cache", ".pytest_cache",
+  ".astro", ".kube", "images", "samples", "docs", "build", "dist"
+]
+
+# Lint rule sets:
+#  E/F: pycodestyle/pyflakes
+#  I: import sorting (isort)
+#  UP: pyupgrade
+#  B: bugbear
+#  C4: list/set/dict comprehension improvements
+#  RUF: Ruff’s own rules
+select = ["E", "F", "I", "UP", "B", "C4", "RUF"]
+fix = true
+
+[tool.ruff.format]
+line-ending = "lf"
+quote-style = "double"
+indent-style = "space"
+
+[tool.ruff.lint.per-file-ignores]
+"dags/rnaseq_mvp.py" = ["E501"]
