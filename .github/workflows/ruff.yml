@@ -10,13 +10,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Lint
       - uses: astral-sh/ruff-action@v1
         with:
-          version: "0.5.7"     # (no leading "v")
+          version: "0.5.7"
           args: "check ."
 
-      # Format check (optional, fails on unformatted code)
       - uses: astral-sh/ruff-action@v1
         with:
           version: "0.5.7"
