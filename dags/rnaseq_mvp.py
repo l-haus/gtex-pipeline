@@ -17,12 +17,12 @@ def _v(key, default):
 PROJECT_ID = _v("PROJECT_ID", "gtex-pipeline")
 GCS_BUCKET     = _v("GCS_BUCKET",     "rna-dev-xxxx")
 GCS_RAW_SAMPLE = _v("GCS_RAW_SAMPLE", "raw/demo/test.fastq")
+GCS_RAW_PREFIX = _v("GCS_RAW_PREFIX", "raw/")
 GCS_QC_PREFIX  = _v("GCS_QC_PREFIX",  "processed/qc/demo")
 SAMPLE_ID = _v("SAMPLE_ID", "demo")
 
 PREFIX_TMP = "tmp/"
 MARKERS_PREFIX = "processed/markers/"
-
 
 common_params = dict(
     PROJECT_ID=PROJECT_ID,
@@ -37,12 +37,49 @@ def _gcs_client():
 
 @dag(
     dag_id="rnaseq_mvp",
-    start_date=datetime(2024, 1, 1, tz="UTC"),
+    start_date=datetime(2025, 1, 1, tz="UTC"),
     schedule=None,
     catchup=False,
     tags=["dev"],
 )
 def rnaseq_mvp():
+    @task(retries=3, retry_delay=timedelta(minutes=1))
+    def discover_samples(bucket: str, raw_prefix: str) -> list[dict]:
+        import re
+        client = _gcs_client()
+        blobs = client.list_blobs(bucket, prefix=raw_prefix)
+
+        def infer_sample_id(obj_name: str) -> str:
+            fn = obj_name.rsplit("/", 1)[-1]
+            if fn.endswith(".fastq.gz"):
+                stem = fn[:-9]
+            elif fn.endswith(".fastq"):
+                stem = fn[:-6]
+            else:
+                stem = fn
+            # drop common read/lane suffixes at the END of the stem
+            stem = re.sub(r'(?:[_\.]?R?[12])(?:_\d{3})?$|_L\d{3,}$', '', stem)
+            # k8s/gcs-safe sample id
+            sid = re.sub(r'[^A-Za-z0-9_.-]+', '-', stem)[:63].strip('-.')
+            return sid or "sample"
+
+        samples = []
+        for b in blobs:
+            n = b.name
+            if n.endswith("/"):
+                continue
+            if not (n.endswith(".fastq") or n.endswith(".fastq.gz")):
+                continue
+            sid = infer_sample_id(n)
+            samples.append({
+                **common_params,
+                "GCS_BUCKET": bucket,
+                "GCS_RAW_SAMPLE": n,
+                "GCS_QC_PREFIX": f"processed/qc/{sid}",
+                "SAMPLE_ID": sid,
+            })
+        return samples            
+
     @task(retries=3, retry_delay=timedelta(minutes=2))
     def list_tmp_keys(bucket: str, prefix: str) -> list[str]:
         client = _gcs_client()
@@ -50,7 +87,7 @@ def rnaseq_mvp():
         out = [b.name for b in blobs if b.name != prefix]
         return out
 
-    @task(retries=2, retry_delay=timedelta(minutes=1))
+    @task(retries=3, retry_delay=timedelta(minutes=1))
     def ensure_marker(key: str, bucket_name: str) -> str:
         """Create a processed marker for idempotency; skip if exists."""
         client = _gcs_client()
@@ -81,7 +118,9 @@ def rnaseq_mvp():
         run.finish()
 
     with TaskGroup(group_id="qc_on_gke") as qc_on_gke:
-        fastqc_kpo = KubernetesPodOperator(
+        sample_params = discover_samples(GCS_BUCKET, GCS_RAW_PREFIX)
+
+        fastqc_kpo = KubernetesPodOperator.partial(
             task_id="fastqc_gke",
             kubernetes_conn_id="k8s_gke",
             name="fastqc-gke",
@@ -100,16 +139,16 @@ def rnaseq_mvp():
             """],
             params=common_params,
             get_logs=True,
-            on_finish_action="keep_pod",
+            on_finish_action="delete_pod",
             reattach_on_restart=True,
             container_resources=V1ResourceRequirements(
                 requests={"cpu": "500m", "memory": "1Gi", "ephemeral-storage": "2Gi"},
                 limits={"cpu": "1", "memory": "2Gi", "ephemeral-storage": "4Gi"},
             ),
-            labels={"pipeline": "rnaseq", "step": "qc", "sample": "demo"},
-        )
+            labels={"pipeline": "rnaseq", "step": "qc"},
+        ).expand(params=sample_params)
 
-        multiqc_kpo = KubernetesPodOperator(
+        multiqc_kpo = KubernetesPodOperator.partial(
             task_id="multiqc_gke",
             kubernetes_conn_id="k8s_gke",
             name="multiqc",
@@ -126,18 +165,17 @@ def rnaseq_mvp():
               if [ -f /work/report/multiqc_report.html ]; then
                 gsutil cp /work/report/multiqc_report.html "gs://{{ params.GCS_BUCKET }}/{{ params.GCS_QC_PREFIX }}/multiqc_report.html"
               fi
-              echo ok | gsutil cp - "gs://{{ params.GCS_BUCKET }}/processed/markers/qc_{{ params.SAMPLE_ID }}.done"
+              echo ok | gsutil cp - "gs://{{ params.GCS_BUCKET }}/processed/markers/multiqc_{{ params.SAMPLE_ID }}.done"
             """],
-            params=common_params,
             get_logs=True,
-            on_finish_action="keep_pod",
+            on_finish_action="delete_pod",
             reattach_on_restart=True,
             container_resources=V1ResourceRequirements(
                 requests={"cpu": "250m", "memory": "1Gi", "ephemeral-storage": "1Gi"},
                 limits={"cpu": "1", "memory": "2Gi", "ephemeral-storage": "1Gi"},
             ),
-            labels={"pipeline":"rnaseq","step":"multiqc","sample":"demo"},
-        )
+            labels={"pipeline":"rnaseq","step":"multiqc"},
+        ).expand(params=sample_params)
 
     @task
     def emit_qc_manifest(bucket_name: str, prefix: str) -> str:
@@ -184,8 +222,8 @@ def rnaseq_mvp():
 
     keys = list_tmp_keys(GCS_BUCKET, PREFIX_TMP)
     marker = ensure_marker.partial(bucket_name=GCS_BUCKET).expand(key=keys)
-
     marker >> qc_on_gke >> log_tmp_to_wandb(keys)
+
     fastqc_kpo >> multiqc_kpo
     m = emit_qc_manifest(GCS_BUCKET, GCS_QC_PREFIX) 
     multiqc_kpo >> m >> log_qc_manifest_to_wandb(m, GCS_BUCKET, GCS_QC_PREFIX)
