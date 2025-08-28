@@ -1,13 +1,23 @@
 name: ruff
-on: [push, pull_request]
+on:
+  push:
+    branches: [main]
+  pull_request:
+
 jobs:
   ruff:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # Lint
       - uses: astral-sh/ruff-action@v1
         with:
-          version: v0.5.7
-          args: |
-            ruff format --check
-            ruff .
+          version: "0.5.7"     # (no leading "v")
+          args: "check ."
+
+      # Format check (optional, fails on unformatted code)
+      - uses: astral-sh/ruff-action@v1
+        with:
+          version: "0.5.7"
+          args: "format --check ."
