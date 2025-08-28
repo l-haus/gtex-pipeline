@@ -1,0 +1,7 @@
+[
+{“key”:“PROJECT_ID”,“value”:“gtex-pipeline”},
+{“key”:“GCS_BUCKET”,“value”:“rna-dev-9c91”},
+{“key”:“GCS_RAW_PREFIX”,“value”:“raw/”},
+{“key”:“GCS_QC_PREFIX”,“value”:“processed/qc/demo”},
+{“key”:“SAMPLE_ID”,“value”:“demo”}
+]
