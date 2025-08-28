@@ -2,7 +2,7 @@
 
 ## Quickstart (local dev with Astro)
 1. Prereqs: Docker + Buildx, gcloud, Astronomer CLI (astro).
-2. Configure Buildx once: ```docker buildx create –use –name xbuilder || true```
+2. Configure Buildx
 3. Start Airflow: ```astro dev start```
     - UI: http://localhost:8080 (default: admin/airflow)
 4.	Set Airflow Variables (UI → Admin → Variables) or import:
