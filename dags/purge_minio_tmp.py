@@ -1,11 +1,12 @@
-from pendulum import datetime, now, duration
 from airflow.decorators import dag, task
 from airflow.providers.amazon.aws.hooks.s3 import S3Hook
+from pendulum import datetime, duration, now
 
 AWS_CONN_ID = "minio_s3"
-BUCKETS     = ["rna-raw", "rna-processed"]
-PREFIX      = "tmp/"
+BUCKETS = ["rna-raw", "rna-processed"]
+PREFIX = "tmp/"
 RETENTION_DAYS = 7
+
 
 @dag(
     dag_id="purge_minio_tmp",
@@ -38,8 +39,13 @@ def purge_minio_tmp():
         if to_delete:
             s3.delete_objects(Bucket=bucket, Delete={"Objects": to_delete})
 
-        return {"bucket": bucket, "scanned": scanned, "deleted": scanned - len(to_delete) if scanned else 0}
+        return {
+            "bucket": bucket,
+            "scanned": scanned,
+            "deleted": scanned - len(to_delete) if scanned else 0,
+        }
 
     purge_bucket.expand(bucket=BUCKETS)
+
 
 purge_minio_tmp()
