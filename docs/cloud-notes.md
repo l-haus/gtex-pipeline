@@ -1080,6 +1080,8 @@ Next (tomorrow)
 	•	Add MultiQC aggregator task (KPO) and a tiny track_to_wandb step.
 
 
+## 2025-08-27
+
 ————————————————————————————————————
 PROJECT: RNA-seq MVP on GCP/GKE via Airflow KPO
 DATE: today (Week 3 Day 2)
@@ -1289,3 +1291,152 @@ OPEN ITEMS FOR TOMORROW
 
 ————————————————————————————————————
 
+## 2025-08-27
+
+RNA-seq MVP on GCP/GKE (Airflow + KPO) — progress log
+
+HIGHLIGHTS
+	•	Built and pushed two custom container images to Artifact Registry:
+	•	rnaseq/fastqc:0.12.1 (FastQC baked in)
+	•	rnaseq/multiqc:1.29.0-kaleido (MultiQC + kaleido in an isolated venv, non-root user)
+	•	Cleaned up KPO scripts and Jinja templating; all QC tasks green end-to-end (FastQC → MultiQC).
+	•	Added a manifest writer and (optional) W&B pointer artifact for QC outputs.
+	•	Learned ARM→AMD64 image flow with docker buildx and tag management.
+	•	Standardized pod cleanup and “nuke” commands for the rnaseq namespace.
+
+⸻
+
+ISSUES + ROOT CAUSES + FIXES
+	1.	MultiQC failing with Plotly/Chromium error
+
+	•	Symptom: MultiQC crashed with ChromeNotFoundError (Plotly export path).
+	•	Root cause: Newer MultiQC/Plotly paths try to use a headless browser if no static exporter is present.
+	•	Fix:
+	•	Pinned MultiQC to 1.29 and installed kaleido==0.2.1 for static Plotly image export.
+	•	Created a Python venv inside the image to avoid Debian PEP 668 “externally managed environment” errors.
+	•	Result: MultiQC runs without needing Chrome and generates the HTML report reliably.
+
+	2.	PEP 668 / externally-managed-environment inside container
+
+	•	Symptom: pip install inside the base image failed.
+	•	Root cause: Debian’s system Python forbids system-wide pip installs.
+	•	Fix: Install python3-venv, create /opt/venv, then install wheels inside the venv. Export PATH to prefer venv.
+
+	3.	“fastqc: command not found”
+
+	•	Symptom: FastQC step failed even though FastQC was installed in the image.
+	•	Root cause: Binary at /opt/FastQC/fastqc wasn’t on PATH; DAG called fastqc directly.
+	•	Fix (either works):
+	•	Call the full path /opt/FastQC/fastqc in the DAG, or
+	•	Add a symlink in the Dockerfile: ln -s /opt/FastQC/fastqc /usr/local/bin/fastqc.
+	•	Result: FastQC executes cleanly.
+
+	4.	Jinja templating / params vs shell vars
+
+	•	Symptom: Jinja errors: UndefinedError: 'dict object' has no attribute 'GCS_BUCKET' and bash “unbound variable”.
+	•	Root cause: Mixed ${VAR} (shell) with Jinja {{ params.VAR }} and one accidental space in {{ params. GCS_BUCKET }}.
+	•	Fix:
+	•	Use raw triple-quoted strings (r”””…”””) in Python so Jinja passes through.
+	•	Only use {{ params.X }} in the script (no ${...}), and pass params=common_params in the KPO.
+	•	Removed stray whitespace in Jinja expressions.
+
+	5.	Pods stuck / startup timeout (Autopilot)
+
+	•	Symptom: PodLaunchFailedException after 120s; “Pod not yet started” or Pending.
+	•	Root cause: Autopilot scheduling delays / image pull latency / transient capacity.
+	•	Fix:
+	•	Wait/retry; ensure image_pull_policy=IfNotPresent once the image is warm.
+	•	Keep resources modest (e.g., requests 250–500m CPU, 1Gi RAM) to help the scheduler.
+
+	6.	Permission denied writing to /work
+
+	•	Symptom: mkdir: cannot create directory '/work': Permission denied.
+	•	Root cause: Running as non-root app user without write permission to the target dir.
+	•	Fix:
+	•	Use a writable working path (e.g., /home/app/work or /tmp/work) in the script, or
+	•	RUN mkdir -p /work && chown -R app:app /work in Dockerfile before USER app.
+
+	7.	ARM Mac → AMD64 build/push speed + tagging
+
+	•	Symptom: Long push time and confusion around re-tagging.
+	•	Root cause: buildx cross-builds and pushes layers; retag needs digest or a fresh build.
+	•	Fix:
+	•	Command used: docker buildx build --platform linux/amd64 -f Dockerfile.multiqc -t northamerica-northeast1-docker.pkg.dev/$PROJECT_ID/rnaseq/multiqc:1.29.0-kaleido --push .
+	•	To add a new tag without rebuild: use digest-based retag with gcloud artifacts docker images add-tag or pull and re-push.
+
+⸻
+
+FINAL STATE (W3D3)
+	•	DAG rnaseq_mvp runs FastQC (pre-baked image) → writes outputs to gs://$BUCKET/$GCS_QC_PREFIX/.
+	•	MultiQC (pre-baked image with venv + kaleido, non-root) aggregates FastQC outputs and writes multiqc_report.html to the same prefix.
+	•	(Optional) QC manifest writer generates _manifest.txt and can log a pointer to W&B (W&B calls currently commented or guarded).
+	•	Airflow Variables used at parse time for bucket/keys; KPO receives params=common_params.
+	•	Manual cleanup commands known; pod lifecycle can be flipped to auto-delete later.
+
+⸻
+
+KEY COMMANDS / SNIPPETS
+
+Build & push (ARM Mac → AMD64):
+	•	docker buildx create –use  (once)
+	•	docker buildx build –platform linux/amd64 -f Dockerfile.fastqc 
+-t northamerica-northeast1-docker.pkg.dev/$PROJECT_ID/rnaseq/fastqc:0.12.1 –push .
+	•	docker buildx build –platform linux/amd64 -f Dockerfile.multiqc 
+-t northamerica-northeast1-docker.pkg.dev/$PROJECT_ID/rnaseq/multiqc:1.29.0-kaleido –push .
+
+Retag (without rebuild):
+	•	Get digest: gcloud artifacts docker images list northamerica-northeast1-docker.pkg.dev/$PROJECT_ID/rnaseq/multiqc –include-tags
+	•	Add tag: gcloud artifacts docker images add-tag 
+northamerica-northeast1-docker.pkg.dev/$PROJECT_ID/rnaseq/multiqc@sha256: 
+northamerica-northeast1-docker.pkg.dev/$PROJECT_ID/rnaseq/multiqc:1.29-kaleido
+
+K8s pod troubleshooting:
+	•	kubectl -n rnaseq get pods
+	•	kubectl -n rnaseq describe pod 
+	•	kubectl -n rnaseq logs   (or with -c base)
+	•	kubectl -n rnaseq get events –sort-by=.lastTimestamp
+
+Delete pods:
+	•	kubectl -n rnaseq delete pod -l kubernetes_pod_operator=True
+	•	kubectl -n rnaseq delete pod –all  (nuke)
+
+Airflow params / Jinja in KPO:
+	•	In operator: params=common_params
+	•	In script: echo “Bucket={{ params.GCS_BUCKET }}  Prefix={{ params.GCS_QC_PREFIX }}”
+	•	Avoid shell ${VAR} unless you actually export it via env=.
+
+⸻
+
+DOCKERFILES (final W3D3)
+
+FastQC (amd64):
+	•	Base: gcr.io/google.com/cloudsdktool/google-cloud-cli:slim
+	•	Install: ca-certificates curl unzip openjdk-17-jre-headless perl
+	•	Fetch unzip FastQC to /opt/FastQC; add symlink to /usr/local/bin/fastqc
+	•	ENTRYPOINT [“bash”,”-lc”]
+
+MultiQC (amd64, non-root, venv):
+	•	Base: gcr.io/google.com/cloudsdktool/google-cloud-cli:471.0.0-slim
+	•	ENV VIRTUAL_ENV=/opt/venv PATH=”/opt/venv/bin:${PATH}”
+	•	Install: python3-venv ca-certificates → python3 -m venv /opt/venv
+	•	pip install multiqc==1.29 kaleido==0.2.1
+	•	Create user app, chown venv; create a writable work dir (/home/app/work) and chown it
+	•	USER app; ENTRYPOINT [“bash”,”-lc”]
+
+⸻
+
+DAG CHANGES (core)
+	•	Introduced common_params and pass to both KPO tasks.
+	•	FastQC now uses pre-baked image; command calls fastqc (symlink) or full path.
+	•	MultiQC uses pre-baked venv+kaleido image; runs as non-root; writes HTML to GCS_QC_PREFIX.
+	•	Manifest writer task composes _manifest.txt in the same prefix.
+	•	Optional W&B logging guarded by WANDB_API_KEY.
+
+⸻
+
+NEXT STEPS (W3D4 preview)
+	•	Flip pod lifecycle to auto-delete: set is_delete_operator_pod=True and remove on_finish_action="keep_pod".
+	•	Add image digests to DAG (image_pull_policy: IfNotPresent + pinned @sha256: later).
+	•	Add basic SLA to QC group (e.g., 30 min) and Airflow alerting hook.
+	•	Start the “trim/align” placeholder with a tiny no-op container to validate the dependency chain.
+	•	Wire a minimal README for /images with build commands and rationale (kaleido, venv, non-root).
