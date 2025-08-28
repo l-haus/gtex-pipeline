@@ -17,11 +17,13 @@ airflow variables import /usr/local/airflow/dags/airflow_variables.example.json
 
 ## Build & push images to Artifact Registry
 
+```
 export REGION=northamerica-northeast1
 export PROJECT_ID=gtex-pipeline
 make login
 make build-fastqc
 make build-multiqc
+```
 
 ### Notes
 
