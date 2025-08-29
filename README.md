@@ -1,8 +1,15 @@
 # gtex-pipeline (QC MVP)
 
+- [Architecture](docs/Architecture.md)
+- [Operations](docs/OPERATIONS.md)
+
 ## Quickstart (local dev with Astro)
 1. Prereqs: Docker + Buildx, gcloud, Astronomer CLI (astro).
-2. Configure Buildx
+2. Configure Buildx:
+```
+docker buildx create --use --name xbuilder
+docker buildx insprect --bootstrap
+```
 3. Start Airflow:
 ```
 astro dev start
