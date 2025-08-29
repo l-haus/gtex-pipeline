@@ -1,6 +1,6 @@
 # gtex-pipeline (QC MVP)
 
-- [Architecture](docs/Architecture.md)
+- [Architecture](docs/ARCHITECTURE.md)
 - [Operations](docs/OPERATIONS.md)
 
 ## Quickstart (local dev with Astro)
