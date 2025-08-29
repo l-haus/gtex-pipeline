@@ -20,3 +20,10 @@ include/.ipynb_checkpoints/
 data
 .secrets/
 samples/
+.ruff_cache/
+pycache/
+*.pyc
+*.pyo
+*.swp
+.swo
+.DS_Store

@@ -1,15 +1,15 @@
 import os
 import tempfile
 from datetime import timedelta
-from pendulum import datetime
+
 from airflow.decorators import dag, task
 from airflow.exceptions import AirflowSkipException
+from airflow.models import Variable
 from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
 from airflow.utils.task_group import TaskGroup
 from google.cloud.storage import Client as GCSClient
 from kubernetes.client import V1ResourceRequirements
-
-from airflow.models import Variable
+from pendulum import datetime
 
 
 def _v(key, default):
@@ -29,13 +29,13 @@ SAMPLE_ID = _v("SAMPLE_ID", "demo")
 PREFIX_TMP = "tmp/"
 MARKERS_PREFIX = "processed/markers/"
 
-common_params = dict(
-    PROJECT_ID=PROJECT_ID,
-    GCS_BUCKET=GCS_BUCKET,
-    GCS_RAW_SAMPLE=GCS_RAW_SAMPLE,
-    GCS_QC_PREFIX=GCS_QC_PREFIX,
-    SAMPLE_ID=SAMPLE_ID,
-)
+common_params = {
+    "PROJECT_ID": PROJECT_ID,
+    "GCS_BUCKET": GCS_BUCKET,
+    "GCS_RAW_SAMPLE": GCS_RAW_SAMPLE,
+    "GCS_QC_PREFIX": GCS_QC_PREFIX,
+    "SAMPLE_ID": SAMPLE_ID,
+}
 
 
 def _gcs_client():
@@ -163,6 +163,7 @@ def rnaseq_mvp():
               echo ":: fastqc:done"
             """
             ],
+            params=common_params,
             get_logs=True,
             on_finish_action="delete_pod",
             reattach_on_restart=True,
@@ -243,15 +244,13 @@ def rnaseq_mvp():
                 continue
             total_bytes += b.size or 0
             count += 1
-            lines.append(
-                f"{b.updated.isoformat()}Z\t{b.size}\tgs://{bucket_name}/{b.name}"
-            )
+            lines.append(f"{b.updated.isoformat()}Z\t{b.size}\tgs://{bucket_name}/{b.name}")
 
         if not lines:
             lines = ["<no files>"]
             count = 0
         summary = f"# SUMMARY\tbytes={total_bytes}\tfiles={count}"
-        lines = [summary] + lines
+        lines = [summary, *lines]
 
         with tempfile.NamedTemporaryFile("w", delete=False, suffix=".txt") as f:
             f.write("\n".join(lines))
@@ -264,8 +263,9 @@ def rnaseq_mvp():
 
     @task
     def log_qc_manifest_to_wandb(gs_uri: str, bucket_name: str, prefix: str) -> None:
-        import wandb
         import tempfile
+
+        import wandb
 
         if not os.getenv("WANDB_API_KEY"):
             print("WANDB_API_KEY missing; skipping W&B")
