@@ -1,9 +1,13 @@
+Dockerfile
+packages.txt
+tests/
 .git
 .env
 .DS_Store
 airflow_settings.yaml
 __pycache__/
-astro
+.astro/
+.kube/
 .venv
 airflow-webserver.pid
 webserver_config.py
@@ -15,3 +19,4 @@ logs/
 include/.ipynb_checkpoints/
 data
 .secrets/
+samples/
