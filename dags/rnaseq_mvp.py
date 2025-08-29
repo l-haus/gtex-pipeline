@@ -48,6 +48,8 @@ def _gcs_client():
     schedule=None,
     catchup=False,
     tags=["dev"],
+    max_active_runs=1,
+    max_active_tasks=6,
 )
 def rnaseq_mvp():
     @task(retries=3, retry_delay=timedelta(minutes=1))
@@ -145,23 +147,39 @@ def rnaseq_mvp():
             arguments=[
                 r"""
               set -euo pipefail
+              echo ":: fastqc:start"
               echo "Bucket={{ params.GCS_BUCKET }}  Sample={{ params.GCS_RAW_SAMPLE }}"
+
               mkdir -p /work/in /work/out
-              gsutil cp "gs://{{ params.GCS_BUCKET }}/{{ params.GCS_RAW_SAMPLE }}" /work/in/test.fastq
-              fastqc /work/in/test.fastq --outdir /work/out --quiet
+              gsutil cp "gs://{{ params.GCS_BUCKET }}/{{ params.GCS_RAW_SAMPLE }}" /work/in/
+              infile=$(basename "{{ params.GCS_RAW_SAMPLE }}")
+
+              echo ":: fastqc:run"
+              fastqc "/work/in/${infile}" --outdir /work/out --quiet
+
+              echo ":: fastqc:upload"
               gsutil -m cp /work/out/* "gs://{{ params.GCS_BUCKET }}/{{ params.GCS_QC_PREFIX }}/"
               gsutil ls -l "gs://{{ params.GCS_BUCKET }}/{{ params.GCS_QC_PREFIX }}/"
+              echo ":: fastqc:done"
             """
             ],
             params=common_params,
             get_logs=True,
             on_finish_action="delete_pod",
             reattach_on_restart=True,
+            execution_timeout=timedelta(minutes=30),
+            pool="gke-small",
+            pool_slots=1,
             container_resources=V1ResourceRequirements(
                 requests={"cpu": "500m", "memory": "1Gi", "ephemeral-storage": "2Gi"},
                 limits={"cpu": "1", "memory": "2Gi", "ephemeral-storage": "4Gi"},
             ),
-            labels={"pipeline": "rnaseq", "step": "qc"},
+            labels={
+                "pipeline": "rnaseq",
+                "step": "qc",
+                "sample_id": "{{ params.SAMPLE_ID }}",
+                "run_id": "{{ ti.run_id }}",
+            },
         ).expand(params=sample_params)
 
         multiqc_kpo = KubernetesPodOperator.partial(
@@ -175,24 +193,40 @@ def rnaseq_mvp():
             arguments=[
                 r"""
               set -euo pipefail
+              echo ":: multiqc:start"
               echo "Bucket={{ params.GCS_BUCKET }}  Prefix={{ params.GCS_QC_PREFIX }}"
+
               mkdir -p /work/qc /work/report
+              echo ":: multiqc:download"
               gsutil -m cp "gs://{{ params.GCS_BUCKET }}/{{ params.GCS_QC_PREFIX }}/*" /work/qc/ || true
+
+              echo ":: multiqc:run"
               multiqc /work/qc -o /work/report || true
+
+              echo ":: multiqc:upload"
               if [ -f /work/report/multiqc_report.html ]; then
                 gsutil cp /work/report/multiqc_report.html "gs://{{ params.GCS_BUCKET }}/{{ params.GCS_QC_PREFIX }}/multiqc_report.html"
               fi
               echo ok | gsutil cp - "gs://{{ params.GCS_BUCKET }}/processed/markers/multiqc_{{ params.SAMPLE_ID }}.done"
+              echo ":: multiqc:done"
             """
             ],
             get_logs=True,
             on_finish_action="delete_pod",
             reattach_on_restart=True,
+            execution_timeout=timedelta(minutes=30),
+            pool="gke-small",
+            pool_slots=1,
             container_resources=V1ResourceRequirements(
                 requests={"cpu": "250m", "memory": "1Gi", "ephemeral-storage": "1Gi"},
                 limits={"cpu": "1", "memory": "2Gi", "ephemeral-storage": "1Gi"},
             ),
-            labels={"pipeline": "rnaseq", "step": "multiqc"},
+            labels={
+                "pipeline": "rnaseq",
+                "step": "multiqc",
+                "sample_id": "{{ params.SAMPLE_ID }}",
+                "run_id": "{{ ti.run_id }}",
+            },
         ).expand(params=sample_params)
 
     @task
@@ -204,14 +238,20 @@ def rnaseq_mvp():
 
         lines = []
         total_bytes = 0
+        count = 0
         for b in blobs:
             if b.name.endswith("/") or b.name == prefix:
                 continue
             total_bytes += b.size or 0
+            count += 1
             lines.append(f"{b.updated.isoformat()}Z\t{b.size}\tgs://{bucket_name}/{b.name}")
 
         if not lines:
             lines = ["<no files>"]
+            count = 0
+        summary = f"# SUMMARY\tbytes={total_bytes}\tfiles={count}"
+        lines = [summary, *lines]
+
         with tempfile.NamedTemporaryFile("w", delete=False, suffix=".txt") as f:
             f.write("\n".join(lines))
             local_path = f.name

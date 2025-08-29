@@ -11,4 +11,3 @@ variable "sa_name" {
   type    = string
   default = "airflow-bucket-rw"
 }
-

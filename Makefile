@@ -20,7 +20,7 @@ show:
 	@echo "MULTIQC => $(AR)/multiqc:$(MULTIQC_TAG)"
 
 build-fastqc:
-	docker buildx build --platform $(PLATFORM) -f Dockerfile.fastqc -t $(AR)/fastqc:$(FASTQC_TAG) --push $(IMAGES_DIR)
+	docker buildx build --platform $(PLATFORM) -f $(IMAGES_DIR)/Dockerfile.fastqc -t $(AR)/fastqc:$(FASTQC_TAG) --push $(IMAGES_DIR)
 
 build-multiqc:
-	docker buildx build --platform $(PLATFORM) -f Dockerfile.multiqc -t $(AR)/multiqc:$(MULTIQC_TAG) --push $(IMAGES_DIR)
+	docker buildx build --platform $(PLATFORM) -f $(IMAGES_DIR)/Dockerfile.multiqc -t $(AR)/multiqc:$(MULTIQC_TAG) --push $(IMAGES_DIR)
